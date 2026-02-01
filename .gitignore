@@ -6,3 +6,4 @@ wandb/*
 setup.sh
 .vscode/
 .venv/
+*.log

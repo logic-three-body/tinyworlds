@@ -204,8 +204,19 @@ def load_videotokenizer_from_checkpoint(checkpoint_path, device, model = None, i
     """Instantiate VideoTokenizer from a checkpoint's saved config and load weights."""
     import torch
     from models.video_tokenizer import VideoTokenizer
-    model_sd = torch.load(Path(checkpoint_path) / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
-    state_cfg = torch.load(Path(checkpoint_path) / STATE, map_location='cpu', weights_only=False)
+    
+    # Handle both directory-based and single .pth file checkpoints
+    p = Path(checkpoint_path)
+    if p.is_file() and p.suffix == '.pth':
+        # Single .pth file: load directly as state dict
+        ckpt = torch.load(p, map_location='cpu', weights_only=False)
+        model_sd = ckpt.get('model') or ckpt.get('model_state_dict') or ckpt
+        state_cfg = {'config': {}} if not isinstance(ckpt, dict) or 'config' not in ckpt else {'config': ckpt.get('config', {})}
+    else:
+        # Directory-based: load from subdirectories
+        model_sd = torch.load(p / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
+        state_cfg = torch.load(p / STATE, map_location='cpu', weights_only=False)
+    
     cfg = state_cfg.get('config', {}) or {}
     frame_size = cfg.get('frame_size', 128)
     kwargs = {
@@ -236,8 +247,19 @@ def load_latent_actions_from_checkpoint(checkpoint_path, device, model = None, i
     """Instantiate LatentActionModel from a checkpoint's saved config and load weights."""
     import torch
     from models.latent_actions import LatentActionModel
-    model_sd = torch.load(Path(checkpoint_path) / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
-    state_cfg = torch.load(Path(checkpoint_path) / STATE, map_location='cpu', weights_only=False)
+    
+    # Handle both directory-based and single .pth file checkpoints
+    p = Path(checkpoint_path)
+    if p.is_file() and p.suffix == '.pth':
+        # Single .pth file: load directly as state dict
+        ckpt = torch.load(p, map_location='cpu', weights_only=False)
+        model_sd = ckpt.get('model') or ckpt.get('model_state_dict') or ckpt
+        state_cfg = {'config': {}} if not isinstance(ckpt, dict) or 'config' not in ckpt else {'config': ckpt.get('config', {})}
+    else:
+        # Directory-based: load from subdirectories
+        model_sd = torch.load(p / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
+        state_cfg = torch.load(p / STATE, map_location='cpu', weights_only=False)
+    
     cfg = state_cfg.get('config', {}) or {}
     frame_size = cfg.get('frame_size', 128)
     kwargs = {
@@ -267,15 +289,31 @@ def load_dynamics_from_checkpoint(checkpoint_path, device, model = None, is_dist
     """Instantiate DynamicsModel from a checkpoint's saved config and load weights."""
     import torch
     from models.dynamics import DynamicsModel
-    model_sd = torch.load(Path(checkpoint_path) / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
-    state_cfg = torch.load(Path(checkpoint_path) / STATE, map_location='cpu', weights_only=False)
+    
+    # Handle both directory-based and single .pth file checkpoints
+    p = Path(checkpoint_path)
+    if p.is_file() and p.suffix == '.pth':
+        # Single .pth file: load directly as state dict
+        ckpt = torch.load(p, map_location='cpu', weights_only=False)
+        model_sd = ckpt.get('model') or ckpt.get('model_state_dict') or ckpt
+        state_cfg = {'config': {}} if not isinstance(ckpt, dict) or 'config' not in ckpt else {'config': ckpt.get('config', {})}
+    else:
+        # Directory-based: load from subdirectories
+        model_sd = torch.load(p / MODEL_CHECKPOINT, map_location='cpu', weights_only=True)
+        state_cfg = torch.load(p / STATE, map_location='cpu', weights_only=False)
+    
     cfg = state_cfg.get('config', {}) or {}
     frame_size = cfg.get('frame_size', 128)
     # Infer conditioning_dim from checkpoint if missing
     conditioning_dim = cfg.get('conditioning_dim', None)
     if conditioning_dim is None:
         cond_inferred = None
-        for k, v in model_sd.get('model', {}).items():
+        # Try to find from model_sd directly (single .pth case)
+        search_dict = model_sd
+        if isinstance(model_sd, dict) and 'model' in model_sd:
+            search_dict = model_sd['model']
+        
+        for k, v in (search_dict.items() if isinstance(search_dict, dict) else []):
             # Linear weight shape: [out_features, in_features]; in_features is conditioning dim
             if k.endswith('to_gamma_beta.1.weight'):
                 cond_inferred = int(v.shape[1])
