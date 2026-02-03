@@ -222,13 +222,27 @@ def main():
     args.prediction_horizon = 1
     args.context_window = 2
     
-    # Auto-resolve checkpoints if needed
+    # Auto-resolve checkpoints for SONIC (not Pole Position)
     base_dir = os.getcwd()
-    if args.use_latest_checkpoints or not os.path.isfile(args.video_tokenizer_path):
+    results_dir = os.path.join(base_dir, 'results')
+    
+    # Find SONIC run (contains 'sonic' in name)
+    sonic_runs = sorted(
+        [d for d in os.listdir(results_dir) if 'sonic' in d.lower()],
+        reverse=True
+    )
+    
+    if sonic_runs:
+        latest_sonic_run = os.path.join(results_dir, sonic_runs[0])
+        print(f"Using SONIC run: {sonic_runs[0]}")
+        
+        args.video_tokenizer_path = find_latest_checkpoint(base_dir, "video_tokenizer", run_root_dir=latest_sonic_run)
+        args.latent_actions_path = find_latest_checkpoint(base_dir, "latent_actions", run_root_dir=latest_sonic_run)
+        args.dynamics_path = find_latest_checkpoint(base_dir, "dynamics", run_root_dir=latest_sonic_run)
+    else:
+        print("Warning: No SONIC checkpoints found, using default search")
         args.video_tokenizer_path = find_latest_checkpoint(base_dir, "video_tokenizer")
-    if args.use_latest_checkpoints or not os.path.isfile(args.latent_actions_path):
         args.latent_actions_path = find_latest_checkpoint(base_dir, "latent_actions")
-    if args.use_latest_checkpoints or not os.path.isfile(args.dynamics_path):
         args.dynamics_path = find_latest_checkpoint(base_dir, "dynamics")
     
     print(f"Video tokenizer: {args.video_tokenizer_path}")
