@@ -45,7 +45,26 @@ def _to_vis(frames):
     return frames.detach().cpu()
 
 
-def _save_tokenizer_recon_visualization(gt_frames, recon_frames, mse):
+def _map_to_unit_range(frames):
+    frames = frames.float()
+    min_val = frames.min().item()
+    max_val = frames.max().item()
+    if min_val < 0:
+        return (frames + 1.0) / 2.0
+    if max_val > 1:
+        return frames / 255.0
+    return frames
+
+
+def _print_frame_stats(label, frames):
+    frames = frames.float()
+    min_val = frames.min().item()
+    max_val = frames.max().item()
+    mean_val = frames.mean().item()
+    print(f"{label} min/max/mean: {min_val:.6f} / {max_val:.6f} / {mean_val:.6f}")
+
+
+def _save_tokenizer_recon_visualization(gt_frames, recon_frames, mse, label):
     """
     Save GT vs Recon comparison visualization.
     
@@ -99,7 +118,7 @@ def _save_tokenizer_recon_visualization(gt_frames, recon_frames, mse):
         axes[1, t].axis('off')
     
     # Add overall title with MSE
-    fig.suptitle(f"Tokenizer Reconstruction: MSE = {mse:.6f}", fontsize=12, fontweight='bold')
+    fig.suptitle(f"Tokenizer Recon {label}: MSE = {mse:.6f}", fontsize=12, fontweight='bold')
     plt.tight_layout()
     
     # Create output directory if needed
@@ -107,7 +126,7 @@ def _save_tokenizer_recon_visualization(gt_frames, recon_frames, mse):
     
     # Save with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f'inference_results/tokenizer_recon_gt_vs_recon_{timestamp}.png'
+    save_path = f'inference_results/tokenizer_recon_gt_vs_recon_{label}_{timestamp}.png'
     fig.savefig(save_path, dpi=100, bbox_inches='tight')
     plt.close(fig)
     
@@ -187,24 +206,31 @@ def main():
     context_frames = ground_truth_frames[:, :args.context_window, :, :, :]
     generated_frames = context_frames.clone()
 
-    # === Tokenizer Reconstruction Sanity Check ===
-    print("\n=== Tokenizer Reconstruction Sanity Check ===")
+    # === Tokenizer Recon A/B Test ===
+    print("\n=== Tokenizer Recon A/B Test ===")
     try:
+        video_tokenizer.eval()
         with torch.inference_mode():
-            # Tokenize and reconstruct context frames
-            idx = video_tokenizer.tokenize(context_frames)
-            lat = video_tokenizer.quantizer.get_latents_from_indices(idx)
-            recon = video_tokenizer.detokenize(lat)
-            
-            # Calculate MSE
-            mse = torch.mean((recon.float() - context_frames.float()) ** 2).item()
-            print(f"Tokenizer recon MSE: {mse:.6f}")
-            
-            # Save visualization
-            _save_tokenizer_recon_visualization(context_frames, recon, mse)
-        print("=== Sanity Check Complete ===\n")
+            test_inputs = {
+                "A": context_frames,
+                "B": torch.clamp(_map_to_unit_range(context_frames), 0.0, 1.0),
+            }
+
+            for label, test_frames in test_inputs.items():
+                idx = video_tokenizer.tokenize(test_frames)
+                lat = video_tokenizer.quantizer.get_latents_from_indices(idx)
+                recon = video_tokenizer.detokenize(lat)
+
+                mse = torch.mean((recon.float() - test_frames.float()) ** 2).item()
+                print(f"[{label}] Recon MSE: {mse:.6f}")
+                _print_frame_stats(f"[{label}] Input", test_frames)
+                _print_frame_stats(f"[{label}] Recon", recon)
+
+                _save_tokenizer_recon_visualization(test_frames, recon, mse, label)
+
+        print("=== A/B Test Complete ===\n")
     except Exception as e:
-        print(f"[ERROR] Tokenizer reconstruction sanity check failed: {e}")
+        print(f"[ERROR] Tokenizer recon A/B test failed: {e}")
         print("Continuing with inference despite the error.\n")
 
     # initialize actions
