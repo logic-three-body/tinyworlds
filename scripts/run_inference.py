@@ -11,6 +11,107 @@ from utils.config import InferenceConfig, load_config
 from utils.inference_utils import load_models, visualize_inference, sample_random_action, get_action_latent
 from einops import repeat
 from typing import Optional
+from datetime import datetime
+
+
+def _to_vis(frames):
+    """
+    Convert frames to [0, 1] range with adaptive normalization.
+    
+    Args:
+        frames: tensor of shape [B, T, C, H, W] or similar
+    
+    Returns:
+        float tensor in [0, 1] on CPU
+    """
+    frames = frames.float()
+    
+    # Detect value range adaptively
+    min_val = frames.min().item()
+    max_val = frames.max().item()
+    
+    # Normalize based on detected range
+    if min_val < 0:
+        # Likely [-1, 1] range
+        frames = (frames + 1.0) / 2.0
+    elif max_val > 1:
+        # Likely [0, 255] range
+        frames = frames / 255.0
+    # else: already in [0, 1]
+    
+    # Clamp to [0, 1]
+    frames = torch.clamp(frames, 0, 1)
+    
+    return frames.detach().cpu()
+
+
+def _save_tokenizer_recon_visualization(gt_frames, recon_frames, mse):
+    """
+    Save GT vs Recon comparison visualization.
+    
+    Args:
+        gt_frames: ground truth frames [B, T, C, H, W]
+        recon_frames: reconstructed frames [B, T, C, H, W]
+        mse: MSE value (float)
+    """
+    # Normalize both to [0, 1]
+    gt_vis = _to_vis(gt_frames)
+    recon_vis = _to_vis(recon_frames)
+    
+    # Extract first batch
+    gt_vis = gt_vis[0]  # [T, C, H, W]
+    recon_vis = recon_vis[0]  # [T, C, H, W]
+    
+    T = gt_vis.shape[0]
+    
+    # Create figure with 2 rows x T columns
+    fig, axes = plt.subplots(2, T, figsize=(3*T, 6))
+    
+    # Handle case where T == 1 (axes is 1D)
+    if T == 1:
+        axes = axes.reshape(2, 1)
+    
+    for t in range(T):
+        # Convert to numpy and transpose to [H, W, C]
+        gt_img = gt_vis[t].permute(1, 2, 0).numpy()
+        recon_img = recon_vis[t].permute(1, 2, 0).numpy()
+        
+        # Handle grayscale case
+        if gt_img.shape[2] == 1:
+            gt_img = gt_img.squeeze(-1)
+            recon_img = recon_img.squeeze(-1)
+            cmap = 'gray'
+        else:
+            # Take first 3 channels if more than 3
+            if gt_img.shape[2] > 3:
+                gt_img = gt_img[..., :3]
+                recon_img = recon_img[..., :3]
+            cmap = None
+        
+        # Plot GT (top row)
+        axes[0, t].imshow(gt_img, cmap=cmap)
+        axes[0, t].set_title(f"GT t={t}", fontsize=8)
+        axes[0, t].axis('off')
+        
+        # Plot Recon (bottom row)
+        axes[1, t].imshow(recon_img, cmap=cmap)
+        axes[1, t].set_title(f"Recon t={t}", fontsize=8)
+        axes[1, t].axis('off')
+    
+    # Add overall title with MSE
+    fig.suptitle(f"Tokenizer Reconstruction: MSE = {mse:.6f}", fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    
+    # Create output directory if needed
+    os.makedirs('inference_results', exist_ok=True)
+    
+    # Save with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f'inference_results/tokenizer_recon_gt_vs_recon_{timestamp}.png'
+    fig.savefig(save_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    
+    print(f"Tokenizer recon visualization saved to: {save_path}")
 
 
 def main():
@@ -85,6 +186,26 @@ def main():
     # start with initial context (first context_window GT frames)
     context_frames = ground_truth_frames[:, :args.context_window, :, :, :]
     generated_frames = context_frames.clone()
+
+    # === Tokenizer Reconstruction Sanity Check ===
+    print("\n=== Tokenizer Reconstruction Sanity Check ===")
+    try:
+        with torch.inference_mode():
+            # Tokenize and reconstruct context frames
+            idx = video_tokenizer.tokenize(context_frames)
+            lat = video_tokenizer.quantizer.get_latents_from_indices(idx)
+            recon = video_tokenizer.detokenize(lat)
+            
+            # Calculate MSE
+            mse = torch.mean((recon.float() - context_frames.float()) ** 2).item()
+            print(f"Tokenizer recon MSE: {mse:.6f}")
+            
+            # Save visualization
+            _save_tokenizer_recon_visualization(context_frames, recon, mse)
+        print("=== Sanity Check Complete ===\n")
+    except Exception as e:
+        print(f"[ERROR] Tokenizer reconstruction sanity check failed: {e}")
+        print("Continuing with inference despite the error.\n")
 
     # initialize actions
     n_actions = None
