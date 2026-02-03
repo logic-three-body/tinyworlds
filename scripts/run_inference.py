@@ -280,6 +280,13 @@ def main():
         # decode next video tokens to frames
         next_frames = video_tokenizer.detokenize(next_video_latents)  # [1, T, C, H, W]
 
+        # Clamp detokenize output to [-1, 1] to stabilize rollout
+        if i < 2:
+            print(f"  [Step {i}] detokenize pre-clamp min/max: {next_frames.min().item():.6f} / {next_frames.max().item():.6f}")
+        next_frames = next_frames.clamp(-1.0, 1.0)
+        if i < 2:
+            print(f"  [Step {i}] detokenize post-clamp min/max: {next_frames.min().item():.6f} / {next_frames.max().item():.6f}")
+
         generated_frames = torch.cat([generated_frames, next_frames[:, -args.prediction_horizon:, :, :]], dim=1)
         # TODO: if using interactive mode, visualize next_frames[:, -1] (recently inferred frame) every time, probably with matplotlib is easiest
         # point is for user to be able to interact with it in real time
