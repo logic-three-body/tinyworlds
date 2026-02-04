@@ -7,3 +7,6 @@ setup.sh
 .vscode/
 .venv/
 *.log
+PROXY_GUIDE.md
+pynet.ps1
+set_proxy.ps1
