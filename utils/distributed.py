@@ -4,7 +4,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import fully_shard
+try:
+    from torch.distributed.fsdp import fully_shard
+except (ImportError, AttributeError):
+    fully_shard = None
 from typing import Dict, Iterable
 
 from utils.config import DistributedConfig
@@ -38,6 +41,8 @@ def prepare_model_for_distributed(model: torch.nn.Module, config: DistributedCon
     if config.use_ddp:
         return DDP(model, device_ids=[device_mesh.get_local_rank()], output_device=device_mesh.get_local_rank(), find_unused_parameters=False)
     if config.use_fsdp:
+        if fully_shard is None:
+            raise RuntimeError("FSDP is unavailable in this PyTorch build; disable FSDP or upgrade PyTorch.")
         mp_policy = config.get_mixed_precision_policy()
         fsdp_kwargs = {
             "reshard_after_forward": config.reshard_after_forward,

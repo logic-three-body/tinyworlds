@@ -1,5 +1,5 @@
 # Training
-batch_size_per_gpu: 350
+batch_size_per_gpu: 16
 gradient_accumulation_steps: 1
 n_updates: 10000
 learning_rate: 0.0001

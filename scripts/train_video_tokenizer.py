@@ -13,7 +13,10 @@ from utils.utils import save_training_state, load_videotokenizer_from_checkpoint
 from utils.wandb_utils import init_wandb, log_training_metrics, log_system_metrics, log_learning_rate, finish_wandb
 from dataclasses import asdict
 from utils.distributed import init_distributed_from_env, prepare_model_for_distributed, unwrap_model, print_param_count_if_main, cleanup_distributed
-from torch.distributed.fsdp import FSDPModule
+try:
+    from torch.distributed.fsdp import FSDPModule
+except (ImportError, AttributeError):
+    FSDPModule = ()
 
 def main():
     # vidtokenizer config merged with training_config.yaml (training takes priority), plus CLI overrides

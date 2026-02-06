@@ -1,6 +1,6 @@
 # Training
-batch_size_per_gpu: 500
-gradient_accumulation_steps: 1
+batch_size_per_gpu: 8
+gradient_accumulation_steps: 4
 n_updates: 300000
 learning_rate: 0.01
 log_interval: 2000
@@ -14,8 +14,8 @@ hidden_dim: 128
 num_blocks: 8
 
 # Paths
-video_tokenizer_path:
-latent_actions_path:
+video_tokenizer_path: /root/tinyworlds/results/2026_02_04_19_51_20/video_tokenizer/checkpoints/video_tokenizer_step_37500
+latent_actions_path: /root/tinyworlds/results/2026_02_05_21_05_51/latent_actions/checkpoints/latent_actions_step_9500
 
 # resume from checkpoint
 checkpoint:

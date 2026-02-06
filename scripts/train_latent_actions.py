@@ -13,7 +13,10 @@ from utils.utils import save_training_state, load_latent_actions_from_checkpoint
 from utils.wandb_utils import init_wandb, log_system_metrics, finish_wandb, log_action_distribution, log_learning_rate
 from dataclasses import asdict
 from utils.distributed import init_distributed_from_env, prepare_model_for_distributed, unwrap_model, print_param_count_if_main, cleanup_distributed
-from torch.distributed.fsdp import FSDPModule
+try:
+    from torch.distributed.fsdp import FSDPModule
+except (ImportError, AttributeError):
+    FSDPModule = ()
 
 def main():
     # latent actions config merged with training_config.yaml (training takes priority), plus CLI overrides

@@ -12,8 +12,40 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torch.distributed.fsdp import FSDPModule
+try:
+    from torch.distributed.fsdp import FSDPModule
+except (ImportError, AttributeError):
+    FSDPModule = None
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+FSDP_TYPES = (FSDPModule,) if FSDPModule is not None else ()
+
+
+def _state_dict_options(**kwargs):
+    supported = StateDictOptions.__init__.__code__.co_varnames
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    return StateDictOptions(**filtered)
+
+
+def _load_model_state_dict(model, model_state_dict, is_distributed):
+    import torch
+
+    if isinstance(model_state_dict, dict) and model_state_dict:
+        if all(torch.is_tensor(v) for v in model_state_dict.values()):
+            model.load_state_dict(model_state_dict, strict=False)
+            return
+
+    try:
+        set_model_state_dict(
+            model=model,
+            model_state_dict=model_state_dict,
+            options=_state_dict_options(
+                full_state_dict=True,
+                broadcast_from_rank0=is_distributed,
+            ),
+        )
+    except Exception:
+        model.load_state_dict(model_state_dict, strict=False)
 
 MODEL_CHECKPOINT = "model_state_dict.pt"
 OPTIMIZER_CHECKPOINT = "optim_state_dict.pt"
@@ -165,10 +197,10 @@ def save_training_state(model, optimizer, scheduler, config, checkpoints_dir, pr
     """
     import torch
     ts = readable_timestamp()
-    if isinstance(model, (FSDPModule, DDP)):
+    if isinstance(model, FSDP_TYPES + (DDP,)):
         state_dict = get_model_state_dict(
             model=model,
-            options=StateDictOptions(
+            options=_state_dict_options(
                 full_state_dict=True,
                 cpu_offload=True,
             ),
@@ -176,7 +208,7 @@ def save_training_state(model, optimizer, scheduler, config, checkpoints_dir, pr
         optimizer_state_dict = get_optimizer_state_dict(
             model=model,
             optimizers=optimizer,
-            options=StateDictOptions(
+            options=_state_dict_options(
                 full_state_dict=True,
                 cpu_offload=True,
             ),
@@ -231,14 +263,7 @@ def load_videotokenizer_from_checkpoint(checkpoint_path, device, model = None, i
     }
     if model is None:
         model = VideoTokenizer(**kwargs)
-    set_model_state_dict(
-        model=model,
-        model_state_dict=model_sd,
-        options=StateDictOptions(
-            full_state_dict=True,
-            broadcast_from_rank0=is_distributed,
-        ),
-    )
+    _load_model_state_dict(model, model_sd, is_distributed)
     model = model.to(device)
     return model, state_cfg
 
@@ -273,14 +298,7 @@ def load_latent_actions_from_checkpoint(checkpoint_path, device, model = None, i
     }
     if model is None:
         model = LatentActionModel(**kwargs)
-    set_model_state_dict(
-        model=model,
-        model_state_dict=model_sd,
-        options=StateDictOptions(
-            full_state_dict=True,
-            broadcast_from_rank0=is_distributed,
-        ),
-    )
+    _load_model_state_dict(model, model_sd, is_distributed)
     model = model.to(device)
     return model, state_cfg
 
@@ -332,14 +350,7 @@ def load_dynamics_from_checkpoint(checkpoint_path, device, model = None, is_dist
     }
     if model is None:
         model = DynamicsModel(**kwargs)
-    set_model_state_dict(
-        model=model,
-        model_state_dict=model_sd,
-        options=StateDictOptions(
-            full_state_dict=True,
-            broadcast_from_rank0=is_distributed,
-        )
-    )
+    _load_model_state_dict(model, model_sd, is_distributed)
     model = model.to(device)
     return model, state_cfg
 
