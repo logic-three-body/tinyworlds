@@ -71,6 +71,7 @@ def main():
         raise FileNotFoundError(f"Latent Action Model checkpoint not found at {args.latent_actions_path}")
 
     # init dynamics model and optional ckpt load
+    start_step = 0
     dynamics_model = DynamicsModel(
         frame_size=(args.frame_size, args.frame_size),
         patch_size=args.patch_size,
@@ -83,12 +84,13 @@ def main():
         num_bins=args.num_bins,
     ).to(args.device)
     if args.checkpoint:
-        dynamics_model, _ = load_dynamics_from_checkpoint(
+        dynamics_model, state_cfg = load_dynamics_from_checkpoint(
             checkpoint_path=args.checkpoint, 
             device=args.device, 
             model=dynamics_model,
             is_distributed=dist_setup['is_distributed'],
         )
+        start_step = int((state_cfg or {}).get('step') or 0)
 
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(dynamics_model, "DynamicsModel", is_main)
@@ -127,8 +129,20 @@ def main():
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)
     train_ctx = torch.amp.autocast(args.device, enabled=True, dtype=torch.bfloat16) if args.amp and not args.distributed.use_fsdp else nullcontext()
 
+    # Resume optimizer/scheduler if checkpoint contains them.
+    if args.checkpoint and os.path.isdir(args.checkpoint):
+        optim_path = os.path.join(args.checkpoint, 'optim_state_dict.pt')
+        state_path = os.path.join(args.checkpoint, 'state.pt')
+        if os.path.isfile(optim_path):
+            optimizer.load_state_dict(torch.load(optim_path, map_location='cpu', weights_only=False))
+        if os.path.isfile(state_path):
+            state = torch.load(state_path, map_location='cpu', weights_only=False)
+            scheduler_state = state.get('scheduler_state_dict') if isinstance(state, dict) else None
+            if scheduler_state is not None:
+                scheduler.load_state_dict(scheduler_state)
+
     results = {
-        'n_updates': 0,
+        'n_updates': start_step,
         'dynamics_losses': [],
         'loss_vals': [],
     }
@@ -157,7 +171,7 @@ def main():
     )
     train_iter = iter(training_loader)
 
-    for i in tqdm(range(0, args.n_updates), disable=not is_main):
+    for i in tqdm(range(start_step, args.n_updates), disable=not is_main):
         optimizer.zero_grad(set_to_none=True)
         if isinstance(dynamics_model, FSDPModule):
             dynamics_model.set_requires_gradient_sync(False)
@@ -235,12 +249,19 @@ def main():
                                 pixel_mask[b, t, patch_row:patch_row+patch_size, patch_col:patch_col+patch_size] = 1 # assigning 1 to the patch in the mask of dim [1, 1, Hp, Wp]
                 pixel_mask_expanded = rearrange(pixel_mask, 'b t h w -> b t 1 h w')
                 masked_frames = x * (1 - pixel_mask_expanded)
-            
-            hyperparameters = args.__dict__
-            save_training_state(dynamics_model, optimizer, scheduler, hyperparameters, checkpoints_dir, prefix='dynamics', step=i)
+
+            # In distributed runs, only rank0 writes checkpoint artifacts.
+            if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
             if is_main:
+                hyperparameters = args.__dict__
+                save_training_state(dynamics_model, optimizer, scheduler, hyperparameters, checkpoints_dir, prefix='dynamics', step=i)
                 save_path = os.path.join(visualizations_dir, f'dynamics_prediction_step_{i}.png')
                 visualize_reconstruction(masked_frames[:16].cpu(), predicted_frames[:16].cpu(), save_path)
+
+            if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
 
             print('\n Step', i, 'Loss:', torch.mean(torch.stack(results["loss_vals"][-args.log_interval:])).item())
 

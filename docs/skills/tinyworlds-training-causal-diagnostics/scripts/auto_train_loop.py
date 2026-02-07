@@ -187,6 +187,8 @@ def retune(stage, tune, reason="gate_fail"):
 def run_stage(args, stage, deps, report):
     cfg_path = Path(args.repo_root) / stage_config(stage, args)
     target = int(read_yaml_scalar(cfg_path, "n_updates", 10000))
+    if args.target_updates > 0:
+        target = int(args.target_updates)
     tune = {
         "batch_size_per_gpu": int(read_yaml_scalar(cfg_path, "batch_size_per_gpu", 8)),
         "learning_rate": float(read_yaml_scalar(cfg_path, "learning_rate", 1e-4)),
@@ -195,6 +197,12 @@ def run_stage(args, stage, deps, report):
         ),
         "log_interval": int(read_yaml_scalar(cfg_path, "log_interval", 1000)),
     }
+    if args.init_batch_size is not None:
+        tune["batch_size_per_gpu"] = int(args.init_batch_size)
+    if args.init_learning_rate is not None:
+        tune["learning_rate"] = float(args.init_learning_rate)
+    if args.init_grad_accum is not None:
+        tune["gradient_accumulation_steps"] = int(args.init_grad_accum)
     chunk = int(args.chunk_size.get(stage, 1000))
     completed = 0
     retries = 0
@@ -346,6 +354,30 @@ def parse_args():
     ap.add_argument("--latent-chunk", type=int, default=1000)
     ap.add_argument("--dynamics-chunk", type=int, default=5000)
     ap.add_argument("--run-root", default="", help="results run root path override")
+    ap.add_argument(
+        "--target-updates",
+        type=int,
+        default=0,
+        help="Override stage target n_updates (0 means use config value)",
+    )
+    ap.add_argument(
+        "--init-learning-rate",
+        type=float,
+        default=None,
+        help="Override initial learning_rate before auto retune",
+    )
+    ap.add_argument(
+        "--init-grad-accum",
+        type=int,
+        default=None,
+        help="Override initial gradient_accumulation_steps before auto retune",
+    )
+    ap.add_argument(
+        "--init-batch-size",
+        type=int,
+        default=None,
+        help="Override initial batch_size_per_gpu before auto retune",
+    )
     ap.add_argument(
         "--only-stage",
         choices=["all", "video_tokenizer", "latent_actions", "dynamics"],
