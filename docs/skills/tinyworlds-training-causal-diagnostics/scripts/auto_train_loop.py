@@ -82,6 +82,20 @@ def latest_checkpoints(stage_checkpoints_dir):
     return latest, latest_valid
 
 
+def resolve_latest_valid_checkpoint(path_str):
+    p = Path(path_str)
+    if not p.exists():
+        raise FileNotFoundError(f"Checkpoint path does not exist: {path_str}")
+    if validate_checkpoint_dir(p):
+        return str(p.resolve())
+    latest_any, latest_valid = latest_checkpoints(p)
+    if latest_valid is None:
+        raise RuntimeError(
+            f"No valid checkpoint found under {path_str}; latest candidate: {latest_any}"
+        )
+    return str(latest_valid.resolve())
+
+
 def find_new_wandb_run(root, since_ts):
     wandb_dir = Path(root) / "wandb"
     runs = [p for p in wandb_dir.glob("run-*") if p.is_dir()]
@@ -332,6 +346,22 @@ def parse_args():
     ap.add_argument("--latent-chunk", type=int, default=1000)
     ap.add_argument("--dynamics-chunk", type=int, default=5000)
     ap.add_argument("--run-root", default="", help="results run root path override")
+    ap.add_argument(
+        "--only-stage",
+        choices=["all", "video_tokenizer", "latent_actions", "dynamics"],
+        default="all",
+        help="Run the full pipeline or a single stage only",
+    )
+    ap.add_argument(
+        "--video-checkpoint",
+        default="",
+        help="Video tokenizer checkpoint dir (or checkpoints root) for dynamics-only mode",
+    )
+    ap.add_argument(
+        "--latent-checkpoint",
+        default="",
+        help="Latent actions checkpoint dir (or checkpoints root) for dynamics-only mode",
+    )
     return ap.parse_args()
 
 
@@ -354,9 +384,26 @@ def main():
         "stages": {},
     }
     deps = {}
-    deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
-    deps["latent_actions"] = run_stage(args, "latent_actions", deps, report)
-    deps["dynamics"] = run_stage(args, "dynamics", deps, report)
+    if args.only_stage == "all":
+        deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
+        deps["latent_actions"] = run_stage(args, "latent_actions", deps, report)
+        deps["dynamics"] = run_stage(args, "dynamics", deps, report)
+    elif args.only_stage == "video_tokenizer":
+        deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
+    elif args.only_stage == "latent_actions":
+        deps["latent_actions"] = run_stage(args, "latent_actions", deps, report)
+    elif args.only_stage == "dynamics":
+        if not args.video_checkpoint or not args.latent_checkpoint:
+            raise ValueError(
+                "--only-stage dynamics requires both --video-checkpoint and --latent-checkpoint"
+            )
+        deps["video_tokenizer"] = resolve_latest_valid_checkpoint(args.video_checkpoint)
+        deps["latent_actions"] = resolve_latest_valid_checkpoint(args.latent_checkpoint)
+        report["dependency_checkpoints"] = {
+            "video_tokenizer": deps["video_tokenizer"],
+            "latent_actions": deps["latent_actions"],
+        }
+        deps["dynamics"] = run_stage(args, "dynamics", deps, report)
 
     report_path = Path(args.repo_root) / "docs/action" / f"auto-training-loop-report-{ts}.md"
     write_report(report_path, report)

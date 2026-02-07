@@ -45,6 +45,16 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --nproc-per-node 2
 ```
 
+For dynamics-only loop with fixed upstream checkpoints:
+```bash
+python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
+  --repo-root . \
+  --nproc-per-node 2 \
+  --only-stage dynamics \
+  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint results/<run>/latent_actions/checkpoints
+```
+
 ### Step 3: Export and Evaluate at Each Gate
 After each chunk:
 - Export run history to `Logs/` (use existing exporter):
