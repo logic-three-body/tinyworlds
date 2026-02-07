@@ -1,0 +1,4 @@
+interface:
+  display_name: "TinyWorlds Auto Training Loop"
+  short_description: "Automate gated training, retune, and retries"
+  default_prompt: "Use $tinyworlds-training-causal-diagnostics to run TinyWorlds training in gate-based loops, auto-evaluate each stage, and retune/restart until all stages pass."
