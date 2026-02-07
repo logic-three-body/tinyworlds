@@ -1,0 +1,3 @@
+interface:
+  display_name: "TinyWorlds Training Diagnostics"
+  short_description: "Analyze TinyWorlds training runs and detect drift"
