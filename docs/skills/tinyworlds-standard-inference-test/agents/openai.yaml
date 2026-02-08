@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tinyworlds Standard Inference Test"
+  short_description: "Validate a run root with run_inference.py smoke/regression test"
+  default_prompt: "Run a standard run_inference.py test for the given TinyWorlds run root, resolve checkpoints in that root, execute the smoke profile, and report pass/fail evidence."
