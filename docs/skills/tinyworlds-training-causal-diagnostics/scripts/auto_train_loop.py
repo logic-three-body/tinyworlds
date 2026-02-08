@@ -146,6 +146,17 @@ def gate_verdict(python_exec, repo_root, stage, csv_path, recent_rows):
     return json.loads(out)
 
 
+def latest_visualization(stage, run_root):
+    vis_dir = Path(run_root) / stage / "visualizations"
+    if not vis_dir.exists():
+        return None
+    files = [p for p in vis_dir.glob("*.png") if p.is_file()]
+    if not files:
+        return None
+    files.sort(key=lambda p: p.stat().st_mtime)
+    return files[-1]
+
+
 def stage_script(stage):
     mapping = {
         "video_tokenizer": "scripts/train_video_tokenizer.py",
@@ -184,7 +195,7 @@ def retune(stage, tune, reason="gate_fail"):
     return tune
 
 
-def run_stage(args, stage, deps, report):
+def run_stage(args, stage, deps, report, initial_checkpoint=None):
     cfg_path = Path(args.repo_root) / stage_config(stage, args)
     target = int(read_yaml_scalar(cfg_path, "n_updates", 10000))
     if args.target_updates > 0:
@@ -203,14 +214,23 @@ def run_stage(args, stage, deps, report):
         tune["learning_rate"] = float(args.init_learning_rate)
     if args.init_grad_accum is not None:
         tune["gradient_accumulation_steps"] = int(args.init_grad_accum)
+    if args.init_log_interval is not None:
+        tune["log_interval"] = int(args.init_log_interval)
     chunk = int(args.chunk_size.get(stage, 1000))
     completed = 0
     retries = 0
     accepted_ckpt = None
+    if initial_checkpoint:
+        accepted_ckpt = resolve_latest_valid_checkpoint(initial_checkpoint)
+    initial_ckpt_resolved = accepted_ckpt
     gates = []
 
     while completed < target:
         gate_updates = min(chunk, target - completed)
+        start_step = step_from_name(Path(accepted_ckpt).name) if accepted_ckpt else -1
+        run_target = (start_step + 1 + gate_updates) if accepted_ckpt else gate_updates
+        vis_before = latest_visualization(stage, args.run_root)
+        vis_before_mtime = vis_before.stat().st_mtime if vis_before else -1.0
         cmd = [
             args.torchrun,
             "--standalone",
@@ -220,7 +240,7 @@ def run_stage(args, stage, deps, report):
             stage_config(stage, args),
             "--training_config",
             args.training_config,
-            f"n_updates={gate_updates}",
+            f"n_updates={run_target}",
             f"batch_size_per_gpu={tune['batch_size_per_gpu']}",
             f"learning_rate={tune['learning_rate']}",
             f"gradient_accumulation_steps={tune['gradient_accumulation_steps']}",
@@ -275,6 +295,25 @@ def run_stage(args, stage, deps, report):
             tune = retune(stage, tune, reason="gate_fail")
             continue
 
+        vis_after = latest_visualization(stage, args.run_root)
+        vis_after_mtime = vis_after.stat().st_mtime if vis_after else -1.0
+        if vis_after is None or vis_after_mtime <= vis_before_mtime:
+            retries += 1
+            gates.append(
+                {
+                    "gate": completed + gate_updates,
+                    "decision": "retune",
+                    "reason": "no_new_visualization",
+                    "visualization_before": str(vis_before) if vis_before else None,
+                    "visualization_after": str(vis_after) if vis_after else None,
+                    "tune_before": dict(tune),
+                }
+            )
+            if retries > args.max_retries:
+                raise RuntimeError(f"{stage}: exceeded max retries with stale visualizations")
+            tune = retune(stage, tune, reason="gate_fail")
+            continue
+
         run_dir = find_new_wandb_run(args.repo_root, start)
         if run_dir is None:
             raise RuntimeError(f"{stage}: no wandb run found after chunk")
@@ -293,6 +332,8 @@ def run_stage(args, stage, deps, report):
             "decision": decision,
             "csv": str(csv_path),
             "latest_valid_checkpoint": str(latest_valid),
+            "latest_visualization": str(vis_after) if vis_after else None,
+            "run_target_n_updates": run_target,
             "tune": dict(tune),
         }
         gates.append(gate_info)
@@ -311,6 +352,7 @@ def run_stage(args, stage, deps, report):
     report["stages"][stage] = {
         "target_updates": target,
         "chunk_size": chunk,
+        "initial_checkpoint": initial_ckpt_resolved,
         "final_checkpoint": accepted_ckpt,
         "gates": gates,
     }
@@ -328,6 +370,7 @@ def write_report(report_path, report):
         lines.append(f"## {stage}")
         lines.append(f"- target_updates: `{data['target_updates']}`")
         lines.append(f"- chunk_size: `{data['chunk_size']}`")
+        lines.append(f"- initial_checkpoint: `{data.get('initial_checkpoint')}`")
         lines.append(f"- final_checkpoint: `{data['final_checkpoint']}`")
         lines.append("- gates:")
         for g in data["gates"]:
@@ -379,6 +422,12 @@ def parse_args():
         help="Override initial batch_size_per_gpu before auto retune",
     )
     ap.add_argument(
+        "--init-log-interval",
+        type=int,
+        default=None,
+        help="Override initial log_interval before auto retune",
+    )
+    ap.add_argument(
         "--only-stage",
         choices=["all", "video_tokenizer", "latent_actions", "dynamics"],
         default="all",
@@ -393,6 +442,11 @@ def parse_args():
         "--latent-checkpoint",
         default="",
         help="Latent actions checkpoint dir (or checkpoints root) for dynamics-only mode",
+    )
+    ap.add_argument(
+        "--dynamics-checkpoint",
+        default="",
+        help="Optional dynamics checkpoint dir (or checkpoints root) to continue training",
     )
     return ap.parse_args()
 
@@ -435,7 +489,13 @@ def main():
             "video_tokenizer": deps["video_tokenizer"],
             "latent_actions": deps["latent_actions"],
         }
-        deps["dynamics"] = run_stage(args, "dynamics", deps, report)
+        deps["dynamics"] = run_stage(
+            args,
+            "dynamics",
+            deps,
+            report,
+            initial_checkpoint=args.dynamics_checkpoint if args.dynamics_checkpoint else None,
+        )
 
     report_path = Path(args.repo_root) / "docs/action" / f"auto-training-loop-report-{ts}.md"
     write_report(report_path, report)

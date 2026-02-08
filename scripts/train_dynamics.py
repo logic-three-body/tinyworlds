@@ -90,7 +90,7 @@ def main():
             model=dynamics_model,
             is_distributed=dist_setup['is_distributed'],
         )
-        start_step = int((state_cfg or {}).get('step') or 0)
+        start_step = int((state_cfg or {}).get('step') or 0) + 1
 
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(dynamics_model, "DynamicsModel", is_main)
@@ -171,6 +171,7 @@ def main():
     )
     train_iter = iter(training_loader)
 
+    last_saved_step = None
     for i in tqdm(range(start_step, args.n_updates), disable=not is_main):
         optimizer.zero_grad(set_to_none=True)
         if isinstance(dynamics_model, FSDPModule):
@@ -259,11 +260,33 @@ def main():
                 save_training_state(dynamics_model, optimizer, scheduler, hyperparameters, checkpoints_dir, prefix='dynamics', step=i)
                 save_path = os.path.join(visualizations_dir, f'dynamics_prediction_step_{i}.png')
                 visualize_reconstruction(masked_frames[:16].cpu(), predicted_frames[:16].cpu(), save_path)
+                last_saved_step = i
 
             if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
                 torch.distributed.barrier()
 
             print('\n Step', i, 'Loss:', torch.mean(torch.stack(results["loss_vals"][-args.log_interval:])).item())
+
+    # Always save final step checkpoint for reliable resume between gated chunks.
+    final_step = args.n_updates - 1
+    # Keep branch identical across ranks to avoid distributed barrier mismatch.
+    need_final_save = final_step >= start_step and (final_step % args.log_interval != 0)
+    if need_final_save:
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        if is_main:
+            hyperparameters = args.__dict__
+            save_training_state(
+                dynamics_model,
+                optimizer,
+                scheduler,
+                hyperparameters,
+                checkpoints_dir,
+                prefix='dynamics',
+                step=final_step,
+            )
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     # finish wandb
     if args.use_wandb and is_main:

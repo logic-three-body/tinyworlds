@@ -55,6 +55,22 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --latent-checkpoint results/<run>/latent_actions/checkpoints
 ```
 
+For long continuation from an existing dynamics checkpoint (example to reach +124k updates):
+```bash
+python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
+  --repo-root . \
+  --nproc-per-node 2 \
+  --only-stage dynamics \
+  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint results/<run>/latent_actions/checkpoints \
+  --dynamics-checkpoint results/<run>/dynamics/checkpoints \
+  --target-updates 124000 \
+  --dynamics-chunk 4000 \
+  --init-learning-rate 0.0005 \
+  --init-grad-accum 2 \
+  --init-log-interval 1000
+```
+
 ### Step 3: Export and Evaluate at Each Gate
 After each chunk:
 - Export run history to `Logs/` (use existing exporter):
@@ -67,6 +83,7 @@ python docs/skills/tinyworlds-training-diagnostics/scripts/export_local_wandb_hi
 - Run `scripts/stage_gate_verdict.py` for numeric verdict.
 - Inspect latest visualization files under `results/<run>/<stage>/visualizations/`.
 - Validate checkpoint integrity (non-empty model/optimizer state).
+- Enforce visualization freshness: if no new `.png` appears for a chunk, treat as gate failure and retune/retry.
 
 ### Step 4: Decide Continue vs Retune
 Per gate, produce exactly one decision:
