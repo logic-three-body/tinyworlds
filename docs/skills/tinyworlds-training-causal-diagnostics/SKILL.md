@@ -22,7 +22,8 @@ Before running:
 - Confirm dual-GPU default unless user says otherwise:
   - `distributed.use_ddp=true`
   - `nproc_per_node=2`
-- Check there is no conflicting active training process.
+- Enforce single active launcher: terminate extra stage processes before each chunk.
+- Enable dual-GPU runtime evidence checks while each chunk is running.
 - Define gate schedule and retry budget from `references/auto-training-gates.md`.
 
 ### Step 2: Run Stage in Chunks
@@ -42,7 +43,9 @@ If user asks for unattended execution, prefer running:
 ```bash
 python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
   --repo-root . \
-  --nproc-per-node 2
+  --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true
 ```
 
 For dynamics-only loop with fixed upstream checkpoints:
@@ -50,6 +53,8 @@ For dynamics-only loop with fixed upstream checkpoints:
 python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
   --repo-root . \
   --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true \
   --only-stage dynamics \
   --video-checkpoint results/<run>/video_tokenizer/checkpoints \
   --latent-checkpoint results/<run>/latent_actions/checkpoints
@@ -60,6 +65,8 @@ For long continuation from an existing dynamics checkpoint (example to reach +12
 python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
   --repo-root . \
   --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true \
   --only-stage dynamics \
   --video-checkpoint results/<run>/video_tokenizer/checkpoints \
   --latent-checkpoint results/<run>/latent_actions/checkpoints \
@@ -120,7 +127,15 @@ After `dynamics` passes:
 2. Keep dual-GPU DDP by default and optimize stability before increasing model size.
 3. Never treat a tiny/empty checkpoint as valid fallback.
 4. If `latest` checkpoint is invalid, pin to newest valid checkpoint explicitly.
-5. Training is not considered complete until standard inference gate passes.
+5. Keep exactly one active training launcher; kill extras and keep the current run process only.
+6. For `nproc_per_node >= 2`, require dual-GPU runtime evidence, otherwise fail gate and retry.
+7. Training is not considered complete until standard inference gate passes.
+
+## Validated Example
+- Dual-GPU launcher/monitor success sample:
+  - command core: `auto_train_loop.py --nproc-per-node 2 --only-stage video_tokenizer --target-updates 200 --video-chunk 200 --cleanup-extra-processes true --enforce-dual-gpu-check true`
+  - report: `docs/action/auto-training-loop-report-2026_02_09_19_10_35.md`
+  - gate evidence: `decision watch`, `launcher <pid>`, `dual_gpu_ok True`.
 
 ## Resources
 - Gate criteria and mutation ladders: `references/auto-training-gates.md`

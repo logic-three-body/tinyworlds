@@ -56,6 +56,15 @@ def parse_scalar(text):
         return value
 
 
+def parse_bool(text):
+    lower = str(text).strip().lower()
+    if lower in ("1", "true", "yes", "y", "on"):
+        return True
+    if lower in ("0", "false", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid bool value: {text}")
+
+
 def read_yaml_scalar(path, key, default=None):
     pattern = re.compile(rf"^\s*{re.escape(key)}\s*:\s*(.*?)\s*$")
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -152,6 +161,19 @@ def resolve_latest_valid_checkpoint(path_str):
     return str(candidates[-1].resolve())
 
 
+def checkpoint_to_model_file(path_str):
+    path = Path(path_str).resolve()
+    if path.is_file():
+        return str(path)
+    model_file = path / MODEL_CHECKPOINT
+    if model_file.is_file():
+        return str(model_file.resolve())
+    raise FileNotFoundError(
+        f"Checkpoint model file not found. Expected file path or directory containing "
+        f"'{MODEL_CHECKPOINT}': {path}"
+    )
+
+
 def find_latest_model_checkpoint(repo_root, model_name, prefer_root=None):
     aliases = MODEL_ALIASES.get(model_name, [model_name])
     search_roots = []
@@ -180,19 +202,6 @@ def list_inference_pngs(repo_root):
     files = [p for p in png_dir.glob("inference_results_gt_vs_pred*.png") if p.is_file()]
     files.sort(key=lambda p: p.stat().st_mtime)
     return files
-
-
-def checkpoint_to_model_file(path_str):
-    path = Path(path_str).resolve()
-    if path.is_file():
-        return str(path)
-    model_file = path / MODEL_CHECKPOINT
-    if model_file.is_file():
-        return str(model_file.resolve())
-    raise FileNotFoundError(
-        f"Checkpoint model file not found. Expected file path or directory containing "
-        f"'{MODEL_CHECKPOINT}': {path}"
-    )
 
 
 def run_auto_train_loop(
@@ -229,6 +238,16 @@ def run_auto_train_loop(
         str(args.nproc_per_node),
         "--max-retries",
         str(args.max_train_retries),
+        "--cleanup-extra-processes",
+        str(args.cleanup_extra_processes).lower(),
+        "--enforce-dual-gpu-check",
+        str(args.enforce_dual_gpu_check).lower(),
+        "--monitor-interval-sec",
+        str(args.monitor_interval_sec),
+        "--gpu-util-threshold",
+        str(args.gpu_util_threshold),
+        "--gpu-required-samples",
+        str(args.gpu_required_samples),
         "--video-chunk",
         str(args.video_chunk),
         "--latent-chunk",
@@ -268,9 +287,9 @@ def run_auto_train_loop(
 
 
 def run_standard_inference_gate(args, repo_root, env, video_ckpt, latent_ckpt, dynamics_ckpt):
-    video_model_file = checkpoint_to_model_file(video_ckpt)
-    latent_model_file = checkpoint_to_model_file(latent_ckpt)
-    dynamics_model_file = checkpoint_to_model_file(dynamics_ckpt)
+    video_checkpoint_dir = resolve_latest_valid_checkpoint(video_ckpt)
+    latent_checkpoint_dir = resolve_latest_valid_checkpoint(latent_ckpt)
+    dynamics_checkpoint_dir = resolve_latest_valid_checkpoint(dynamics_ckpt)
 
     before = {str(p.resolve()) for p in list_inference_pngs(repo_root)}
     started_at = time.time()
@@ -292,9 +311,9 @@ def run_standard_inference_gate(args, repo_root, env, video_ckpt, latent_ckpt, d
         f"generation_steps={args.generation_steps}",
         f"preload_ratio={args.preload_ratio}",
         f"temperature={args.temperature}",
-        f"video_tokenizer_path={video_model_file}",
-        f"latent_actions_path={latent_model_file}",
-        f"dynamics_path={dynamics_model_file}",
+        f"video_tokenizer_path={video_checkpoint_dir}",
+        f"latent_actions_path={latent_checkpoint_dir}",
+        f"dynamics_path={dynamics_checkpoint_dir}",
     ]
     proc = run_process(cmd, cwd=repo_root, env=env)
     output = f"{proc.stdout}\n{proc.stderr}".strip()
@@ -332,7 +351,63 @@ def run_standard_inference_gate(args, repo_root, env, video_ckpt, latent_ckpt, d
         "mse_ok": mse_ok,
         "new_png": new_png,
         "passed": pass_ok,
+        "selected_checkpoints": {
+            "video_tokenizer": video_checkpoint_dir,
+            "latent_actions": latent_checkpoint_dir,
+            "dynamics": dynamics_checkpoint_dir,
+        },
     }
+
+
+def run_git_audit(args, repo_root, env, timestamp):
+    script = Path(repo_root) / "docs/skills/tinyworlds-train-to-inference/scripts/git_zelda_audit.py"
+    cmd = [
+        args.python_exec,
+        str(script),
+        "--repo-root",
+        repo_root,
+        "--year",
+        str(args.history_audit_year),
+        "--mode",
+        args.history_audit_mode,
+        "--out-dir",
+        args.analysis_out_dir,
+        "--timestamp",
+        timestamp,
+    ]
+    proc = run_process(cmd, cwd=repo_root, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git_zelda_audit failed with exit code {proc.returncode}")
+    return parse_last_json_line(proc.stdout)
+
+
+def run_wandb_analysis(args, repo_root, env, timestamp, run_root, stage_run_ids):
+    script = Path(repo_root) / "docs/skills/tinyworlds-train-to-inference/scripts/wandb_stage_analyzer.py"
+    project = args.wandb_project or read_yaml_scalar(Path(repo_root) / args.training_config, "wandb_project", "tinyworlds")
+    cmd = [
+        args.python_exec,
+        str(script),
+        "--repo-root",
+        repo_root,
+        "--run-root",
+        run_root,
+        "--wandb-project",
+        str(project),
+        "--wandb-source",
+        args.wandb_source,
+        "--analysis-out-dir",
+        args.analysis_out_dir,
+        "--timestamp",
+        timestamp,
+    ]
+    for stage, run_id in sorted((stage_run_ids or {}).items()):
+        if run_id:
+            cmd += ["--stage-run-id", f"{stage}={run_id}"]
+
+    proc = run_process(cmd, cwd=repo_root, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"wandb_stage_analyzer failed with exit code {proc.returncode}")
+    return parse_last_json_line(proc.stdout)
 
 
 def write_report(report_path, report):
@@ -343,14 +418,26 @@ def write_report(report_path, report):
         f"- repo_root: `{report['repo_root']}`",
         f"- run_root: `{report['run_root']}`",
         f"- train_stage: `{report['train_stage']}`",
+        f"- checkpoint_policy: `{report['checkpoint_policy']}`",
+        f"- teacher_forced: `{report.get('teacher_forced')}`",
+        f"- cleanup_extra_processes: `{report.get('cleanup_extra_processes')}`",
+        f"- enforce_dual_gpu_check: `{report.get('enforce_dual_gpu_check')}`",
+        f"- monitor_interval_sec: `{report.get('monitor_interval_sec')}`",
+        f"- gpu_util_threshold: `{report.get('gpu_util_threshold')}`",
+        f"- gpu_required_samples: `{report.get('gpu_required_samples')}`",
         "",
         "## Checkpoints",
         f"- video_tokenizer: `{report['checkpoints']['video_tokenizer']}`",
         f"- latent_actions: `{report['checkpoints']['latent_actions']}`",
         f"- dynamics: `{report['checkpoints']['dynamics']}`",
         "",
-        "## Inference Attempts",
+        "## Stage Run IDs",
     ]
+    for stage in ["video_tokenizer", "latent_actions", "dynamics"]:
+        lines.append(f"- {stage}: `{report['stage_run_ids'].get(stage)}`")
+
+    lines.append("")
+    lines.append("## Inference Attempts")
     for idx, attempt in enumerate(report["inference_attempts"], start=1):
         lines.append(f"### Attempt {idx}")
         lines.append(f"- passed: `{attempt['passed']}`")
@@ -359,11 +446,31 @@ def write_report(report_path, report):
         lines.append(f"- new_png: `{attempt['new_png']}`")
         lines.append(f"- returncode: `{attempt['returncode']}`")
         lines.append("")
+
     lines.append("## Training Calls")
     for item in report["training_calls"]:
         lines.append(f"- stage `{item['stage']}` target_updates `{item.get('target_updates')}`")
         lines.append(f"  - deps: `{item.get('deps')}`")
         lines.append(f"  - report: `{item.get('report')}`")
+        lines.append(f"  - stage_run_ids: `{item.get('stage_run_ids')}`")
+
+    lines += ["", "## History Audit"]
+    hist = report.get("history_audit") or {}
+    lines.append(f"- report: `{hist.get('report')}`")
+    lines.append(f"- year: `{hist.get('year')}`")
+    lines.append(f"- mode: `{hist.get('mode')}`")
+    lines.append(f"- total_commits_in_year: `{hist.get('total_commits_in_year')}`")
+    lines.append(f"- selected_count: `{hist.get('selected_count')}`")
+    lines.append(f"- relevant_file_touches: `{hist.get('relevant_file_touches')}`")
+
+    lines += ["", "## W&B Analysis"]
+    wb = report.get("wandb_analysis") or {}
+    lines.append(f"- enabled: `{report.get('enable_wandb_analysis')}`")
+    lines.append(f"- source_mode: `{report.get('wandb_source')}`")
+    lines.append(f"- report: `{wb.get('report')}`")
+    lines.append(f"- json: `{wb.get('json')}`")
+    lines.append(f"- plot_dir: `{wb.get('plot_dir')}`")
+
     Path(report_path).write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -376,12 +483,15 @@ def write_retrospective(retro_path, report, alignment_snapshot):
     if best_attempt is None and report["inference_attempts"]:
         best_attempt = report["inference_attempts"][-1]
 
+    hist = report.get("history_audit") or {}
+    wb = report.get("wandb_analysis") or {}
     lines = [
         f"# ZELDA Train-to-Inference Retrospective ({report['timestamp']})",
         "",
         "## 1) 闭环结果",
         f"- 状态: `{report['status']}`",
         f"- run_root: `{report['run_root']}`",
+        f"- inference_teacher_forced: `{report.get('teacher_forced')}`",
         f"- final_video_checkpoint: `{report['checkpoints'].get('video_tokenizer')}`",
         f"- final_latent_checkpoint: `{report['checkpoints'].get('latent_actions')}`",
         f"- final_dynamics_checkpoint: `{report['checkpoints'].get('dynamics')}`",
@@ -392,12 +502,23 @@ def write_retrospective(retro_path, report, alignment_snapshot):
             f"- mse_threshold: `{best_attempt.get('mse_threshold')}`",
             f"- inference_png: `{best_attempt.get('new_png')}`",
         ]
+
     lines += [
         "",
-        "## 2) 旧参数版本不达标的核心原因",
+        "## 2) 2025 历史证据",
+        f"- audit_report: `{hist.get('report')}`",
+        f"- year: `{hist.get('year')}`",
+        f"- mode: `{hist.get('mode')}`",
+        f"- total_commits_in_year: `{hist.get('total_commits_in_year')}`",
+        f"- strict_selected_count: `{hist.get('selected_count')}`",
+        f"- relevant_file_touches: `{hist.get('relevant_file_touches')}`",
+        f"- selected_commits: `{hist.get('selected_commits')}`",
+        "",
+        "## 3) 旧参数版本不达标的核心原因",
         "| 项目 | 旧值 | 新值 | 影响 |",
         "|---|---|---|---|",
     ]
+
     for key in [
         "training.embed_dim",
         "training.num_heads",
@@ -431,15 +552,30 @@ def write_retrospective(retro_path, report, alignment_snapshot):
 
     lines += [
         "",
-        "## 3) 新参数配置为何成功",
-        f"- 通过 `configs/training.yaml` 统一 shared backbone 参数（`embed_dim/num_heads/hidden_dim/num_blocks`），避免 video-latent-dynamics 结构漂移。",
+        "## 4) 新参数配置为何成功",
+        "- 通过 `configs/training.yaml` 统一 shared backbone 参数（`embed_dim/num_heads/hidden_dim/num_blocks`），避免 video-latent-dynamics 结构漂移。",
         f"- 将 dynamics 的学习率从 `{LEGACY_BASELINE['dynamics.learning_rate']}` 降到 `{alignment_snapshot.get('dynamics.learning_rate')}`，降低震荡并提高收敛稳定性。",
-        f"- 将 `dynamics` 的 checkpoint 路径改为运行时注入（配置中 `null`），避免跨 run 误用旧权重。",
+        "- 将 `dynamics` 的 checkpoint 路径改为运行时注入（配置中 `null`），避免跨 run 误用旧权重。",
         "- 训练后立即运行标准推理门禁，用同一组 checkpoint 验证端到端行为，确保“能训完”且“能推理”。",
+    ]
+    if report.get("teacher_forced"):
+        lines += [
+            "",
+            "## 4.1) 推理模式说明",
+            "- 本次通过样例使用 `teacher_forced=true`。",
+            "- 该结果用于验证闭环链路可执行与参数对齐，不等价于严格自回归(`teacher_forced=false`)达标。",
+        ]
+
+    lines += [
         "",
-        "## 4) 后续技能流程固化",
-        "- 每次闭环通过后，必须在 `docs/action/` 生成本反思报告。",
-        "- 报告至少包含：旧参数问题、修复后的关键改动、推理指标、可视化产物路径。",
+        "## 5) W&B分析与产物",
+        f"- wandb_analysis_report: `{wb.get('report')}`",
+        f"- wandb_analysis_json: `{wb.get('json')}`",
+        f"- wandb_plots_dir: `{wb.get('plot_dir')}`",
+        "",
+        "## 6) 后续技能流程固化",
+        "- 每次闭环通过后，必须在 `docs/action/` 生成反思报告、W&B分析报告、2025历史审计报告。",
+        "- 闭环完成条件不再只看训练和推理，还必须包含三类文档产物。",
     ]
     Path(retro_path).write_text("\n".join(lines), encoding="utf-8")
 
@@ -460,13 +596,19 @@ def parse_args():
     parser.add_argument(
         "--train-stage",
         choices=["none", "all", "video_tokenizer", "latent_actions", "dynamics"],
-        default="dynamics",
+        default="all",
     )
+    parser.add_argument("--checkpoint-policy", choices=["fresh", "latest"], default="fresh")
     parser.add_argument("--video-checkpoint", default="")
     parser.add_argument("--latent-checkpoint", default="")
     parser.add_argument("--dynamics-checkpoint", default="")
     parser.add_argument("--target-updates", type=int, default=0)
     parser.add_argument("--max-train-retries", type=int, default=5)
+    parser.add_argument("--cleanup-extra-processes", type=parse_bool, default=True)
+    parser.add_argument("--enforce-dual-gpu-check", type=parse_bool, default=True)
+    parser.add_argument("--monitor-interval-sec", type=float, default=5.0)
+    parser.add_argument("--gpu-util-threshold", type=float, default=1.0)
+    parser.add_argument("--gpu-required-samples", type=int, default=2)
     parser.add_argument("--video-chunk", type=int, default=5000)
     parser.add_argument("--latent-chunk", type=int, default=1000)
     parser.add_argument("--dynamics-chunk", type=int, default=2000)
@@ -490,7 +632,35 @@ def parse_args():
     parser.add_argument("--retry-init-learning-rate", type=float, default=0.0005)
     parser.add_argument("--retry-lr-decay", type=float, default=0.7)
     parser.add_argument("--retry-lr-floor", type=float, default=1e-6)
+
+    parser.add_argument("--enable-wandb-analysis", type=parse_bool, default=True)
+    parser.add_argument(
+        "--wandb-source",
+        choices=["api_first", "api_only", "local_only"],
+        default="api_first",
+    )
+    parser.add_argument("--wandb-project", default="")
+    parser.add_argument("--analysis-out-dir", default="docs/action")
+
+    parser.add_argument("--history-audit-year", type=int, default=2025)
+    parser.add_argument(
+        "--history-audit-mode",
+        choices=["strict", "wide", "current_paths"],
+        default="strict",
+    )
     return parser.parse_args()
+
+
+def initialize_checkpoints(args, repo_root, run_root):
+    if args.checkpoint_policy == "latest":
+        video_ckpt = args.video_checkpoint or find_latest_model_checkpoint(repo_root, "video_tokenizer", run_root)
+        latent_ckpt = args.latent_checkpoint or find_latest_model_checkpoint(repo_root, "latent_actions", run_root)
+        dynamics_ckpt = args.dynamics_checkpoint or find_latest_model_checkpoint(repo_root, "dynamics", run_root)
+    else:
+        video_ckpt = args.video_checkpoint
+        latent_ckpt = args.latent_checkpoint
+        dynamics_ckpt = args.dynamics_checkpoint
+    return video_ckpt, latent_ckpt, dynamics_ckpt
 
 
 def main():
@@ -509,15 +679,27 @@ def main():
         "repo_root": repo_root,
         "run_root": run_root,
         "train_stage": args.train_stage,
+        "checkpoint_policy": args.checkpoint_policy,
+        "teacher_forced": bool(args.teacher_forced),
         "training_calls": [],
         "inference_attempts": [],
         "checkpoints": {},
         "status": "failed",
+        "stage_run_ids": {},
+        "history_audit": {},
+        "wandb_analysis": {},
+        "enable_wandb_analysis": args.enable_wandb_analysis,
+        "wandb_source": args.wandb_source,
+        "cleanup_extra_processes": args.cleanup_extra_processes,
+        "enforce_dual_gpu_check": args.enforce_dual_gpu_check,
+        "monitor_interval_sec": args.monitor_interval_sec,
+        "gpu_util_threshold": args.gpu_util_threshold,
+        "gpu_required_samples": args.gpu_required_samples,
     }
 
-    video_ckpt = args.video_checkpoint or find_latest_model_checkpoint(repo_root, "video_tokenizer", run_root)
-    latent_ckpt = args.latent_checkpoint or find_latest_model_checkpoint(repo_root, "latent_actions", run_root)
-    dynamics_ckpt = args.dynamics_checkpoint or find_latest_model_checkpoint(repo_root, "dynamics", run_root)
+    report["history_audit"] = run_git_audit(args, repo_root, env, timestamp)
+
+    video_ckpt, latent_ckpt, dynamics_ckpt = initialize_checkpoints(args, repo_root, run_root)
 
     if args.train_stage != "none":
         train_out = run_auto_train_loop(
@@ -532,25 +714,34 @@ def main():
             target_updates=args.target_updates,
             init_learning_rate=args.init_learning_rate,
         )
+        stage_run_ids = train_out.get("stage_run_ids", {}) or {}
         report["training_calls"].append(
             {
                 "stage": args.train_stage,
                 "target_updates": args.target_updates,
                 "deps": train_out.get("deps"),
                 "report": train_out.get("report"),
+                "stage_run_ids": stage_run_ids,
             }
         )
         deps = train_out.get("deps", {}) or {}
         video_ckpt = deps.get("video_tokenizer", video_ckpt)
         latent_ckpt = deps.get("latent_actions", latent_ckpt)
         dynamics_ckpt = deps.get("dynamics", dynamics_ckpt)
+        report["stage_run_ids"].update(stage_run_ids)
 
-    if not video_ckpt:
-        video_ckpt = find_latest_model_checkpoint(repo_root, "video_tokenizer")
-    if not latent_ckpt:
-        latent_ckpt = find_latest_model_checkpoint(repo_root, "latent_actions")
-    if not dynamics_ckpt:
-        dynamics_ckpt = find_latest_model_checkpoint(repo_root, "dynamics")
+    if args.checkpoint_policy == "latest":
+        if not video_ckpt:
+            video_ckpt = find_latest_model_checkpoint(repo_root, "video_tokenizer")
+        if not latent_ckpt:
+            latent_ckpt = find_latest_model_checkpoint(repo_root, "latent_actions")
+        if not dynamics_ckpt:
+            dynamics_ckpt = find_latest_model_checkpoint(repo_root, "dynamics")
+
+    if not video_ckpt or not latent_ckpt or not dynamics_ckpt:
+        raise RuntimeError(
+            "Missing checkpoints after training. With checkpoint-policy=fresh, pass --train-stage all or explicit --*-checkpoint paths."
+        )
 
     video_ckpt = resolve_latest_valid_checkpoint(video_ckpt)
     latent_ckpt = resolve_latest_valid_checkpoint(latent_ckpt)
@@ -587,6 +778,7 @@ def main():
             target_updates=retry_target,
             init_learning_rate=retry_lr,
         )
+        stage_run_ids = train_out.get("stage_run_ids", {}) or {}
         report["training_calls"].append(
             {
                 "stage": "dynamics",
@@ -594,10 +786,12 @@ def main():
                 "deps": train_out.get("deps"),
                 "report": train_out.get("report"),
                 "retry_learning_rate": retry_lr,
+                "stage_run_ids": stage_run_ids,
             }
         )
         deps = train_out.get("deps", {}) or {}
         dynamics_ckpt = resolve_latest_valid_checkpoint(deps.get("dynamics", dynamics_ckpt))
+        report["stage_run_ids"].update(stage_run_ids)
         retry_lr = max(retry_lr * args.retry_lr_decay, args.retry_lr_floor)
 
     report["checkpoints"] = {
@@ -606,17 +800,31 @@ def main():
         "dynamics": dynamics_ckpt,
     }
 
+    if args.enable_wandb_analysis:
+        report["wandb_analysis"] = run_wandb_analysis(
+            args=args,
+            repo_root=repo_root,
+            env=env,
+            timestamp=timestamp,
+            run_root=run_root,
+            stage_run_ids=report["stage_run_ids"],
+        )
+
     report_path = Path(repo_root) / "docs/action" / f"train-to-inference-report-{timestamp}.md"
     write_report(report_path, report)
     retro_path = Path(repo_root) / "docs/action" / f"train-to-inference-retrospective-{timestamp}.md"
     write_retrospective(retro_path, report, load_alignment_snapshot(repo_root))
+
     print(
         json.dumps(
             {
                 "status": report["status"],
                 "report": str(report_path),
                 "retrospective": str(retro_path),
+                "history_audit": report.get("history_audit", {}).get("report"),
+                "wandb_analysis": report.get("wandb_analysis", {}).get("report"),
                 "checkpoints": report["checkpoints"],
+                "stage_run_ids": report["stage_run_ids"],
                 "inference_attempts": len(report["inference_attempts"]),
             },
             ensure_ascii=False,

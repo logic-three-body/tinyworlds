@@ -5,9 +5,25 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
+
+STAGE_SCRIPT_NAMES = {
+    "video_tokenizer": "train_video_tokenizer.py",
+    "latent_actions": "train_latent_actions.py",
+    "dynamics": "train_dynamics.py",
+}
+
+
+def parse_bool(text):
+    low = str(text).strip().lower()
+    if low in ("1", "true", "yes", "y", "on"):
+        return True
+    if low in ("0", "false", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid bool value: {text}")
 
 
 def parse_scalar(text):
@@ -42,6 +58,340 @@ def read_yaml_scalar(path, key, default=None):
 def run_cmd(cmd, env=None):
     print("$", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True, env=env)
+
+
+def safe_check_output(cmd):
+    try:
+        return subprocess.check_output(cmd, text=True).strip()
+    except Exception:
+        return ""
+
+
+def list_process_table():
+    out = safe_check_output(["ps", "-eo", "pid=,ppid=,stat=,cmd="])
+    table = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        table[pid] = {
+            "pid": pid,
+            "ppid": ppid,
+            "state": parts[2],
+            "cmd": parts[3],
+        }
+    return table
+
+
+def descendants_of(root_pid, table):
+    by_parent = {}
+    for pid, row in table.items():
+        by_parent.setdefault(row["ppid"], []).append(pid)
+    out = []
+    stack = list(by_parent.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
+        stack.extend(by_parent.get(pid, []))
+    return out
+
+
+def pid_exists(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def terminate_process_tree(root_pid, grace_seconds=10.0):
+    table = list_process_table()
+    tree = [root_pid] + descendants_of(root_pid, table)
+    tree = [pid for pid in sorted(set(tree), reverse=True) if pid != os.getpid()]
+    if not tree:
+        return {"root_pid": root_pid, "targeted": [], "remaining": []}
+
+    for pid in tree:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
+
+    deadline = time.time() + max(0.0, float(grace_seconds))
+    while time.time() < deadline:
+        remaining = [pid for pid in tree if pid_exists(pid)]
+        if not remaining:
+            return {"root_pid": root_pid, "targeted": tree, "remaining": []}
+        time.sleep(0.5)
+
+    remaining = [pid for pid in tree if pid_exists(pid)]
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
+    time.sleep(0.5)
+    still = [pid for pid in remaining if pid_exists(pid)]
+    return {"root_pid": root_pid, "targeted": tree, "remaining": still}
+
+
+def stage_from_cmd(cmd):
+    cmd_low = cmd.lower()
+    for stage, script_name in STAGE_SCRIPT_NAMES.items():
+        if script_name in cmd_low:
+            return stage
+    return None
+
+
+def is_stage_launcher(cmd):
+    stage = stage_from_cmd(cmd)
+    if stage is None:
+        return False, None
+    cmd_low = cmd.lower()
+    is_torchrun = "torchrun" in cmd_low and STAGE_SCRIPT_NAMES[stage] in cmd_low
+    is_direct_python = (
+        "python" in cmd_low
+        and STAGE_SCRIPT_NAMES[stage] in cmd_low
+        and "--local-rank" not in cmd_low
+        and "--local_rank" not in cmd_low
+    )
+    return (is_torchrun or is_direct_python), stage
+
+
+def find_training_launchers(stage=None):
+    rows = []
+    for row in list_process_table().values():
+        keep, row_stage = is_stage_launcher(row["cmd"])
+        if not keep:
+            continue
+        if stage is not None and row_stage != stage:
+            continue
+        row = dict(row)
+        row["stage"] = row_stage
+        rows.append(row)
+    rows.sort(key=lambda x: x["pid"])
+    return rows
+
+
+def find_training_stage_processes(table=None):
+    if table is None:
+        table = list_process_table()
+    rows = []
+    for row in table.values():
+        row_stage = stage_from_cmd(row["cmd"])
+        if row_stage is None:
+            continue
+        item = dict(row)
+        item["stage"] = row_stage
+        rows.append(item)
+    rows.sort(key=lambda x: x["pid"])
+    return rows
+
+
+def cleanup_extra_launchers(keep_pid=None):
+    table = list_process_table()
+    launchers = find_training_launchers(stage=None)
+    stage_rows = find_training_stage_processes(table=table)
+    keep_tree = set()
+    if keep_pid is not None:
+        keep_tree = set([int(keep_pid)] + descendants_of(int(keep_pid), table))
+
+    extras = [
+        row
+        for row in stage_rows
+        if row["pid"] not in keep_tree and row["pid"] != os.getpid()
+    ]
+    extra_pids = {row["pid"] for row in extras}
+    roots = [row for row in extras if row["ppid"] not in extra_pids]
+
+    killed = []
+    for row in roots:
+        pid = int(row["pid"])
+        result = terminate_process_tree(pid)
+        killed.append(
+            {
+                "pid": pid,
+                "stage": row["stage"],
+                "state": row["state"],
+                "remaining": result["remaining"],
+            }
+        )
+    return {
+        "seen_launchers": launchers,
+        "seen_stage_processes": stage_rows,
+        "killed": killed,
+    }
+
+
+def query_gpu_utilization():
+    out = safe_check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    values = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            values[int(parts[0])] = float(parts[1])
+        except ValueError:
+            continue
+    return values
+
+
+def query_pid_to_gpu_indices():
+    gpu_uuid_out = safe_check_output(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"]
+    )
+    uuid_to_idx = {}
+    for raw in gpu_uuid_out.splitlines():
+        parts = [x.strip() for x in raw.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            uuid_to_idx[parts[1]] = int(parts[0])
+        except ValueError:
+            continue
+
+    app_out = safe_check_output(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+            "--format=csv,noheader",
+        ]
+    )
+    pid_map = {}
+    for raw in app_out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 2:
+            continue
+        gpu_uuid = parts[0]
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        gpu_idx = uuid_to_idx.get(gpu_uuid)
+        if gpu_idx is None:
+            continue
+        pid_map.setdefault(pid, set()).add(gpu_idx)
+    return pid_map
+
+
+def training_gpu_indices_for_launcher(launcher_pid):
+    table = list_process_table()
+    training_tree = set([launcher_pid] + descendants_of(launcher_pid, table))
+    pid_to_gpu = query_pid_to_gpu_indices()
+    gpus = set()
+    for pid in training_tree:
+        gpus.update(pid_to_gpu.get(pid, set()))
+    return sorted(gpus)
+
+
+def run_training_with_monitor(cmd, env, stage, args):
+    monitor = {
+        "stage": stage,
+        "launcher_pid": None,
+        "cleanup_events": [],
+        "gpu_samples": 0,
+        "gpu_util_max": {},
+        "gpu_util_hits": {},
+        "gpu_process_gpu_max": 0,
+        "gpu_process_dual_samples": 0,
+        "dual_gpu_check_enabled": bool(
+            args.enforce_dual_gpu_check and int(args.nproc_per_node) >= 2
+        ),
+        "dual_gpu_ok": True,
+    }
+
+    if args.cleanup_extra_processes:
+        pre = cleanup_extra_launchers(keep_pid=None)
+        if pre["killed"]:
+            monitor["cleanup_events"].append({"phase": "pre_launch", **pre})
+
+    print("$", " ".join(cmd), flush=True)
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        start_new_session=True,
+    )
+    monitor["launcher_pid"] = proc.pid
+
+    interval = max(0.5, float(args.monitor_interval_sec))
+    while True:
+        rc = proc.poll()
+
+        if args.cleanup_extra_processes:
+            running = cleanup_extra_launchers(keep_pid=proc.pid)
+            if running["killed"]:
+                monitor["cleanup_events"].append({"phase": "running", **running})
+
+        if monitor["dual_gpu_check_enabled"]:
+            util = query_gpu_utilization()
+            gpu_indices = training_gpu_indices_for_launcher(proc.pid)
+            monitor["gpu_samples"] += 1
+            monitor["gpu_process_gpu_max"] = max(
+                monitor["gpu_process_gpu_max"], len(gpu_indices)
+            )
+            if len(gpu_indices) >= 2:
+                monitor["gpu_process_dual_samples"] += 1
+            for idx, u in util.items():
+                key = str(idx)
+                monitor["gpu_util_max"][key] = max(
+                    float(u), float(monitor["gpu_util_max"].get(key, 0.0))
+                )
+                if float(u) >= float(args.gpu_util_threshold):
+                    monitor["gpu_util_hits"][key] = int(monitor["gpu_util_hits"].get(key, 0)) + 1
+
+        if rc is not None:
+            break
+        time.sleep(interval)
+
+    if monitor["dual_gpu_check_enabled"]:
+        util_ok_gpus = [
+            idx
+            for idx, hits in monitor["gpu_util_hits"].items()
+            if int(hits) >= int(args.gpu_required_samples)
+        ]
+        process_ok = monitor["gpu_process_gpu_max"] >= 2 or monitor["gpu_process_dual_samples"] >= 1
+        util_ok = len(util_ok_gpus) >= 2
+        monitor["dual_gpu_ok"] = bool(process_ok or util_ok)
+        monitor["dual_gpu_detail"] = {
+            "required_samples": int(args.gpu_required_samples),
+            "util_threshold": float(args.gpu_util_threshold),
+            "util_ok_gpus": util_ok_gpus,
+            "process_ok": process_ok,
+            "util_ok": util_ok,
+        }
+
+    if args.cleanup_extra_processes:
+        post = cleanup_extra_launchers(keep_pid=None)
+        if post["killed"]:
+            monitor["cleanup_events"].append({"phase": "post_run", **post})
+    return int(proc.returncode), monitor
 
 
 def step_from_name(name):
@@ -106,6 +456,13 @@ def find_new_wandb_run(root, since_ts):
     return (recent[-1] if recent else runs[-1]).resolve()
 
 
+def wandb_run_id_from_dir(run_dir):
+    if run_dir is None:
+        return None
+    parts = str(run_dir).rstrip("/").split("-")
+    return parts[-1] if parts else None
+
+
 def export_stage_history(python_exec, repo_root, stage, run_dir, suffix):
     run_name = run_dir.name
     run_id = run_name.split("-")[-1]
@@ -158,12 +515,7 @@ def latest_visualization(stage, run_root):
 
 
 def stage_script(stage):
-    mapping = {
-        "video_tokenizer": "scripts/train_video_tokenizer.py",
-        "latent_actions": "scripts/train_latent_actions.py",
-        "dynamics": "scripts/train_dynamics.py",
-    }
-    return mapping[stage]
+    return f"scripts/{STAGE_SCRIPT_NAMES[stage]}"
 
 
 def stage_config(stage, args):
@@ -181,6 +533,9 @@ def retune(stage, tune, reason="gate_fail"):
         if tune["batch_size_per_gpu"] > 1:
             tune["batch_size_per_gpu"] = max(1, tune["batch_size_per_gpu"] // 2)
             return tune
+    if reason == "gpu_guard_fail":
+        # Process/GPU guard failures are usually orchestration issues; keep optimizer knobs unchanged.
+        return tune
     if stage == "video_tokenizer":
         tune["learning_rate"] = max(tune["learning_rate"] * 0.5, 1e-6)
         tune["gradient_accumulation_steps"] = max(1, tune["gradient_accumulation_steps"] + 1)
@@ -230,6 +585,7 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             warm_start_ckpt = resolved
     initial_ckpt_resolved = accepted_ckpt or warm_start_ckpt
     gates = []
+    accepted_run_id = None
 
     while completed < target:
         gate_updates = min(chunk, target - completed)
@@ -242,21 +598,38 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             run_target = gate_updates
         vis_before = latest_visualization(stage, args.run_root)
         vis_before_mtime = vis_before.stat().st_mtime if vis_before else -1.0
-        cmd = [
-            args.torchrun,
-            "--standalone",
-            f"--nproc_per_node={args.nproc_per_node}",
-            stage_script(stage),
-            "--config",
-            stage_config(stage, args),
-            "--training_config",
-            args.training_config,
-            f"n_updates={run_target}",
-            f"batch_size_per_gpu={tune['batch_size_per_gpu']}",
-            f"learning_rate={tune['learning_rate']}",
-            f"gradient_accumulation_steps={tune['gradient_accumulation_steps']}",
-            f"log_interval={tune['log_interval']}",
-        ]
+        if int(args.nproc_per_node) <= 1:
+            cmd = [
+                args.python_exec,
+                stage_script(stage),
+                "--config",
+                stage_config(stage, args),
+                "--training_config",
+                args.training_config,
+                "distributed.use_ddp=false",
+                "nproc_per_node=1",
+                f"n_updates={run_target}",
+                f"batch_size_per_gpu={tune['batch_size_per_gpu']}",
+                f"learning_rate={tune['learning_rate']}",
+                f"gradient_accumulation_steps={tune['gradient_accumulation_steps']}",
+                f"log_interval={tune['log_interval']}",
+            ]
+        else:
+            cmd = [
+                args.torchrun,
+                "--standalone",
+                f"--nproc_per_node={args.nproc_per_node}",
+                stage_script(stage),
+                "--config",
+                stage_config(stage, args),
+                "--training_config",
+                args.training_config,
+                f"n_updates={run_target}",
+                f"batch_size_per_gpu={tune['batch_size_per_gpu']}",
+                f"learning_rate={tune['learning_rate']}",
+                f"gradient_accumulation_steps={tune['gradient_accumulation_steps']}",
+                f"log_interval={tune['log_interval']}",
+            ]
         if accepted_ckpt:
             cmd.append(f"checkpoint={accepted_ckpt}")
         elif warm_start_ckpt and completed == 0:
@@ -272,23 +645,40 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         old_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{repo_abs}:{old_pp}" if old_pp else repo_abs
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        try:
-            run_cmd(cmd, env=env)
-        except subprocess.CalledProcessError as exc:
+        returncode, runtime_monitor = run_training_with_monitor(cmd, env=env, stage=stage, args=args)
+        if returncode != 0:
             retries += 1
             gates.append(
                 {
                     "gate": completed + gate_updates,
                     "decision": "retune",
-                    "reason": f"runtime_error_exit_{exc.returncode}",
+                    "reason": f"runtime_error_exit_{returncode}",
                     "tune_before": dict(tune),
+                    "runtime_monitor": runtime_monitor,
                 }
             )
             if retries > args.max_retries:
                 raise RuntimeError(
                     f"{stage}: exceeded max retries ({args.max_retries}) after runtime errors"
-                ) from exc
+                )
             tune = retune(stage, tune, reason="runtime_error")
+            continue
+        if runtime_monitor.get("dual_gpu_check_enabled") and not runtime_monitor.get("dual_gpu_ok"):
+            retries += 1
+            gates.append(
+                {
+                    "gate": completed + gate_updates,
+                    "decision": "retune",
+                    "reason": "dual_gpu_not_active",
+                    "tune_before": dict(tune),
+                    "runtime_monitor": runtime_monitor,
+                }
+            )
+            if retries > args.max_retries:
+                raise RuntimeError(
+                    f"{stage}: exceeded max retries ({args.max_retries}) after dual-GPU guard failures"
+                )
+            tune = retune(stage, tune, reason="gpu_guard_fail")
             continue
 
         stage_ckpt_dir = Path(args.run_root) / stage / "checkpoints"
@@ -348,11 +738,15 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             "latest_visualization": str(vis_after) if vis_after else None,
             "run_target_n_updates": run_target,
             "tune": dict(tune),
+            "wandb_run_dir": str(run_dir),
+            "wandb_run_id": wandb_run_id_from_dir(run_dir),
+            "runtime_monitor": runtime_monitor,
         }
         gates.append(gate_info)
 
         if decision in ("continue", "watch"):
             accepted_ckpt = str(latest_valid)
+            accepted_run_id = gate_info["wandb_run_id"]
             completed += gate_updates
             retries = 0
             continue
@@ -367,6 +761,7 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         "chunk_size": chunk,
         "initial_checkpoint": initial_ckpt_resolved,
         "final_checkpoint": accepted_ckpt,
+        "stage_run_id": accepted_run_id,
         "gates": gates,
     }
     return accepted_ckpt
@@ -378,6 +773,9 @@ def write_report(report_path, report):
     lines.append("")
     lines.append(f"- run_root: `{report['run_root']}`")
     lines.append(f"- nproc_per_node: `{report['nproc_per_node']}`")
+    lines.append(f"- cleanup_extra_processes: `{report.get('cleanup_extra_processes')}`")
+    lines.append(f"- enforce_dual_gpu_check: `{report.get('enforce_dual_gpu_check')}`")
+    lines.append(f"- monitor_interval_sec: `{report.get('monitor_interval_sec')}`")
     lines.append("")
     for stage, data in report["stages"].items():
         lines.append(f"## {stage}")
@@ -385,10 +783,14 @@ def write_report(report_path, report):
         lines.append(f"- chunk_size: `{data['chunk_size']}`")
         lines.append(f"- initial_checkpoint: `{data.get('initial_checkpoint')}`")
         lines.append(f"- final_checkpoint: `{data['final_checkpoint']}`")
+        lines.append(f"- stage_run_id: `{data.get('stage_run_id')}`")
         lines.append("- gates:")
         for g in data["gates"]:
+            monitor = g.get("runtime_monitor") or {}
+            dual = monitor.get("dual_gpu_ok")
+            launcher = monitor.get("launcher_pid")
             lines.append(
-                f"  - gate `{g['gate']}` decision `{g['decision']}` checkpoint `{g.get('latest_valid_checkpoint')}`"
+                f"  - gate `{g['gate']}` decision `{g['decision']}` checkpoint `{g.get('latest_valid_checkpoint')}` launcher `{launcher}` dual_gpu_ok `{dual}`"
             )
         lines.append("")
     Path(report_path).write_text("\n".join(lines), encoding="utf-8")
@@ -406,6 +808,36 @@ def parse_args():
     ap.add_argument("--nproc-per-node", type=int, default=2)
     ap.add_argument("--max-retries", type=int, default=5)
     ap.add_argument("--recent-rows", type=int, default=0, help="Gate scorer recent rows")
+    ap.add_argument(
+        "--cleanup-extra-processes",
+        type=parse_bool,
+        default=True,
+        help="Detect and terminate extra stage launchers; keep only current training process",
+    )
+    ap.add_argument(
+        "--enforce-dual-gpu-check",
+        type=parse_bool,
+        default=True,
+        help="When nproc_per_node>=2, require evidence that both GPUs were active during training",
+    )
+    ap.add_argument(
+        "--monitor-interval-sec",
+        type=float,
+        default=5.0,
+        help="Seconds between process/GPU monitor checks while a stage is running",
+    )
+    ap.add_argument(
+        "--gpu-util-threshold",
+        type=float,
+        default=1.0,
+        help="GPU utilization threshold (percent) counted as active sample",
+    )
+    ap.add_argument(
+        "--gpu-required-samples",
+        type=int,
+        default=2,
+        help="Required active samples per GPU for utilization-based dual-GPU evidence",
+    )
     ap.add_argument("--video-chunk", type=int, default=5000)
     ap.add_argument("--latent-chunk", type=int, default=1000)
     ap.add_argument("--dynamics-chunk", type=int, default=5000)
@@ -480,6 +912,9 @@ def main():
         "timestamp": ts,
         "run_root": args.run_root,
         "nproc_per_node": args.nproc_per_node,
+        "cleanup_extra_processes": bool(args.cleanup_extra_processes),
+        "enforce_dual_gpu_check": bool(args.enforce_dual_gpu_check),
+        "monitor_interval_sec": float(args.monitor_interval_sec),
         "stages": {},
     }
     deps = {}
@@ -530,7 +965,22 @@ def main():
 
     report_path = Path(args.repo_root) / "docs/action" / f"auto-training-loop-report-{ts}.md"
     write_report(report_path, report)
-    print(json.dumps({"status": "ok", "report": str(report_path), "deps": deps}, ensure_ascii=False))
+    stage_run_ids = {
+        stage: data.get("stage_run_id")
+        for stage, data in report["stages"].items()
+        if data.get("stage_run_id")
+    }
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "report": str(report_path),
+                "deps": deps,
+                "stage_run_ids": stage_run_ids,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

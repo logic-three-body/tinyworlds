@@ -147,7 +147,7 @@ def main():
 
     # check if any path is missing
     def missing(path: Optional[str]) -> bool:
-        return (path is None) or (not os.path.isfile(path))
+        return (path is None) or (not os.path.exists(path))
 
     # resolve latest checkpoints if requested or any path missing
     base_dir = os.getcwd()
@@ -169,11 +169,11 @@ def main():
 
     # validate required paths
     if missing(args.video_tokenizer_path):
-        raise FileNotFoundError("video_tokenizer_path is not set or not a file. Set it in configs/inference.yaml or enable use_latest_checkpoints with available runs.")
+        raise FileNotFoundError("video_tokenizer_path is not set or does not exist. Set it in configs/inference.yaml or enable use_latest_checkpoints with available runs.")
     if use_latent_actions and missing(args.latent_actions_path):
-        raise FileNotFoundError("latent_actions_path is not set or not a file while actions are requested. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
+        raise FileNotFoundError("latent_actions_path is not set or does not exist while actions are requested. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
     if missing(args.dynamics_path):
-        raise FileNotFoundError("dynamics_path is not set or not a file. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
+        raise FileNotFoundError("dynamics_path is not set or does not exist. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
  
     # load models, optionally compile
     video_tokenizer, latent_action_model, dynamics_model = load_models(args.video_tokenizer_path, args.latent_actions_path, args.dynamics_path, args.device, use_actions=use_latent_actions)
