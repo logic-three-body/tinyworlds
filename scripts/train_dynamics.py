@@ -119,11 +119,21 @@ def main():
             else:
                 decay.append(param)
 
-    # fused AdamW
-    optimizer = optim.AdamW([
-        {'params': decay, 'weight_decay': 0.01},
-        {'params': no_decay, 'weight_decay': 0}
-    ], lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-8, fused=True)
+    # fused AdamW may fail with mixed layouts under DDP; keep fused for single-GPU CUDA.
+    adamw_kwargs = {
+        'lr': args.learning_rate,
+        'betas': (0.9, 0.999),
+        'eps': 1e-8,
+    }
+    if str(args.device) == 'cuda' and not args.distributed.use_ddp:
+        adamw_kwargs['fused'] = True
+    optimizer = optim.AdamW(
+        [
+            {'params': decay, 'weight_decay': 0.01},
+            {'params': no_decay, 'weight_decay': 0},
+        ],
+        **adamw_kwargs,
+    )
 
     # cosine scheduler for lr warmup and AMP grad scaler
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)
@@ -134,12 +144,28 @@ def main():
         optim_path = os.path.join(args.checkpoint, 'optim_state_dict.pt')
         state_path = os.path.join(args.checkpoint, 'state.pt')
         if os.path.isfile(optim_path):
-            optimizer.load_state_dict(torch.load(optim_path, map_location='cpu', weights_only=False))
+            try:
+                optimizer.load_state_dict(
+                    torch.load(optim_path, map_location='cpu', weights_only=False)
+                )
+            except ValueError as exc:
+                if is_main:
+                    print(
+                        f"[WARN] Optimizer state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                        "Continuing with freshly initialized optimizer."
+                    )
         if os.path.isfile(state_path):
             state = torch.load(state_path, map_location='cpu', weights_only=False)
             scheduler_state = state.get('scheduler_state_dict') if isinstance(state, dict) else None
             if scheduler_state is not None:
-                scheduler.load_state_dict(scheduler_state)
+                try:
+                    scheduler.load_state_dict(scheduler_state)
+                except Exception as exc:
+                    if is_main:
+                        print(
+                            f"[WARN] Scheduler state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                            "Continuing with freshly initialized scheduler."
+                        )
 
     results = {
         'n_updates': start_step,

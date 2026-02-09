@@ -13,6 +13,10 @@ frame_size: 128
 latent_dim: 5 # for video tokenizer
 num_bins: 4 # for video tokenizer
 n_actions: 16
+embed_dim: 32
+num_heads: 8
+hidden_dim: 128
+num_blocks: 4
 
 # performance
 amp: true

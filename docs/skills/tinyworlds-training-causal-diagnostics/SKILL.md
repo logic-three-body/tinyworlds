@@ -105,7 +105,10 @@ Then hand off checkpoint paths:
 
 ### Step 6: Finish Full Pipeline
 After `dynamics` passes:
-- Run a short inference smoke test.
+- Run `docs/skills/tinyworlds-standard-inference-test` immediately (no manual gap).
+- Check `inference_results/inference_results_gt_vs_pred_*.png` and parsed MSE.
+- For ZELDA default gate: `Mean Squared Error (GT vs Pred) <= 0.03`.
+- If inference gate fails, return to `dynamics` retune/retry loop, then re-run inference gate.
 - Write a report in `docs/action/` with:
   - gate-by-gate decisions,
   - config changes applied,
@@ -117,6 +120,7 @@ After `dynamics` passes:
 2. Keep dual-GPU DDP by default and optimize stability before increasing model size.
 3. Never treat a tiny/empty checkpoint as valid fallback.
 4. If `latest` checkpoint is invalid, pin to newest valid checkpoint explicitly.
+5. Training is not considered complete until standard inference gate passes.
 
 ## Resources
 - Gate criteria and mutation ladders: `references/auto-training-gates.md`

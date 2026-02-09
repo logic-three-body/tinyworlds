@@ -1,155 +1,84 @@
 ---
 name: tinyworlds-train-to-inference
-description: Summarize and execute the TinyWorlds end to end workflow from dataset download and prep, through three stage training (video_tokenizer, latent_actions, dynamics), checkpoint validation, offline inference, and interactive play scripts (play_zelda.py, play_sonic.py, play_pole.py). Use when users ask to run from training data to inference, make a newly trained run playable, or debug why trained checkpoints cannot be used for inference.
+description: "Run TinyWorlds ZELDA as a closed loop from gated training to inference validation: execute tinyworlds-training-causal-diagnostics, then tinyworlds-standard-inference-test, inspect inference_results and MSE, and if inference fails automatically retune/retrain dynamics then re-test until pass or retry budget is exhausted. Use when users ask for train-to-inference automation, checkpoint readiness validation, or fixing train-pass but inference-fail issues."
 ---
 
-# Tinyworlds Train To Inference
+# TinyWorlds Train-To-Inference
 
-## Overview
+## Goal
+Use one deterministic loop:
+1. Run full gated training in order (`video_tokenizer -> latent_actions -> dynamics`).
+2. Run standard inference validation (`tinyworlds-standard-inference-test`).
+3. Check `inference_results` + metric gate.
+4. If fail, retune/retrain `dynamics` and re-run inference.
+5. If pass, write a retrospective report under `docs/action/`.
 
-Standardize one workflow:
-environment setup -> data prep -> training -> checkpoint validation -> inference -> interactive play.
+## Config Alignment Rule (ZELDA)
+Before running the loop, enforce cross-stage backbone alignment (following `d574160`'s alignment principle):
+- `patch_size`, `context_length`, `frame_size`, `latent_dim`, `num_bins`, `n_actions` from `configs/training.yaml`.
+- Shared backbone parameters aligned across `video/latent/dynamics`:
+  - `embed_dim`
+  - `num_heads`
+  - `hidden_dim`
+  - `num_blocks`
 
-## Step 1: Prepare Environment
+Do not keep stale hardcoded checkpoint paths in `configs/dynamics.yaml`; prefer CLI/runtime injection.
 
+## Single Command (Recommended)
 Run from repo root:
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-pip install -r requirements.txt
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
+```bash
+python docs/skills/tinyworlds-train-to-inference/scripts/train_to_inference_loop.py \
+  --repo-root . \
+  --python-exec ./.venv/bin/python \
+  --torchrun ./.venv/bin/torchrun \
+  --train-stage all \
+  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint results/<run>/latent_actions/checkpoints \
+  --dynamics-checkpoint results/<run>/dynamics/checkpoints \
+  --video-chunk 200 \
+  --latent-chunk 200 \
+  --dynamics-chunk 200 \
+  --target-updates 200 \
+  --init-log-interval 100 \
+  --max-mse 0.03 \
+  --max-inference-retries 2
 ```
 
-For CUDA runs, verify:
+## Inference Pass/Fail Gate
+Pass only when all conditions hold:
+- `scripts/run_inference.py` exits successfully.
+- Logs include:
+  - selected checkpoints for all 3 models
+  - `Inferring frame ...`
+  - `Inference stats`
+- A new PNG appears under `inference_results/inference_results_gt_vs_pred_*.png`.
+- `Mean Squared Error (GT vs Pred)` is present and `<= max_mse`.
 
-```powershell
-nvidia-smi
-.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
-```
+Fail when any condition above is missing.
 
-## Step 2: Prepare Dataset
+## Retune Policy on Inference Failure
+If inference fails:
+1. Continue from latest valid `dynamics` checkpoint.
+2. Increase dynamics target updates by one retry chunk (default `+2000`).
+3. Lower dynamics init LR each retry (`retry_init_learning_rate * retry_lr_decay`).
+4. Re-run inference gate.
+5. Stop when pass or retry budget reached.
 
-Download dataset files into `data/`:
+## Artifacts
+- Runtime report:
+  - `docs/action/train-to-inference-report-<timestamp>.md`
+- Retrospective report (required):
+  - `docs/action/train-to-inference-retrospective-<timestamp>.md`
+- Training reports from controller:
+  - `docs/action/auto-training-loop-report-<timestamp>.md`
+- Inference outputs:
+  - `inference_results/*.png`
 
-```powershell
-.\.venv\Scripts\python.exe scripts/download_assets.py datasets --pattern "zelda_frames.h5"
-```
-
-Common dataset file names:
-- `zelda_frames.h5`
-- `sonic_frames.h5`
-- `pole_position_frames.h5`
-- `picodoom_frames.h5`
-- `pong_frames.h5`
-
-Verify file exists:
-
-```powershell
-Test-Path data\zelda_frames.h5
-```
-
-## Step 3: Train Models
-
-Prefer full pipeline:
-
-```powershell
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-.\.venv\Scripts\python.exe scripts/full_train.py --config configs/training.yaml -- --dataset=ZELDA
-```
-
-Run by stage when needed:
-
-```powershell
-.\.venv\Scripts\python.exe scripts/train_video_tokenizer.py --config configs/video_tokenizer.yaml --training_config configs/training.yaml
-.\.venv\Scripts\python.exe scripts/train_latent_actions.py --config configs/latent_actions.yaml --training_config configs/training.yaml
-.\.venv\Scripts\python.exe scripts/train_dynamics.py --config configs/dynamics.yaml --training_config configs/training.yaml video_tokenizer_path=<video_ckpt_dir> latent_actions_path=<latent_ckpt_dir>
-```
-
-Notes:
-- `full_train.py` chains all stages and writes one run root in `results/<timestamp>/`.
-- `train_dynamics.py` requires valid tokenizer and latent action checkpoints.
-
-## Step 4: Validate Checkpoints
-
-Each checkpoint directory should contain:
-- `model_state_dict.pt`
-- `optim_state_dict.pt`
-- `state.pt`
-
-Detect suspicious tiny model weights:
-
-```powershell
-Get-ChildItem results -Recurse -Filter model_state_dict.pt | Where-Object { $_.Length -le 1024 } | Select-Object FullName, Length
-```
-
-If the latest step is invalid, fall back to the previous valid step.
-
-## Step 5: Run Offline Inference
-
-Run with latest available checkpoints:
-
-```powershell
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-.\.venv\Scripts\python.exe scripts/run_inference.py --config configs/inference.yaml -- use_latest_checkpoints=true dataset=ZELDA device=cuda use_actions=true
-```
-
-Success signals:
-- Terminal prints selected checkpoint paths.
-- `inference_results/*.png` is generated.
-
-## Step 6: Run Interactive Play
-
-Zelda:
-
-```powershell
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-.\.venv\Scripts\python.exe scripts/play_zelda.py
-```
-
-Sonic:
-
-```powershell
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-.\.venv\Scripts\python.exe scripts/play_sonic.py
-```
-
-Pole Position:
-
-```powershell
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-.\.venv\Scripts\python.exe scripts/play_pole.py
-```
-
-## Step 7: Fix "Trained But Not Playable"
-
-Apply this checklist:
-
-1. Ensure all three checkpoints are valid and loadable.
-2. If checkpoints come from different runs, create one merged run folder.
-3. Match run name suffix to play script selector:
-- include `zelda` for `play_zelda.py`
-- include `sonic` for `play_sonic.py`
-- include `pole` or `pole_position` for `play_pole.py`
-4. Prefer latest valid step, not just latest step number.
-
-Use this merged layout:
-
-```text
-results/<timestamp>_zelda/
-  video_tokenizer/checkpoints/<video_tokenizer_step_xxx>/
-  latent_actions/checkpoints/<latent_actions_step_xxx>/
-  dynamics/checkpoints/<dynamics_step_xxx>/
-```
-
-## Quick Template: Data To Playable Zelda
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-$env:PYTHONPATH = "$pwd;$env:PYTHONPATH"
-python scripts/download_assets.py datasets --pattern "zelda_frames.h5"
-python scripts/full_train.py --config configs/training.yaml -- --dataset=ZELDA
-python scripts/run_inference.py --config configs/inference.yaml -- use_latest_checkpoints=true dataset=ZELDA device=cuda use_actions=true
-python scripts/play_zelda.py
-```
+## Resources
+- Gated training controller:
+  - `docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py`
+- Standard inference entrypoint:
+  - `scripts/run_inference.py`
+- This skill automation wrapper:
+  - `docs/skills/tinyworlds-train-to-inference/scripts/train_to_inference_loop.py`

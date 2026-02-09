@@ -94,11 +94,21 @@ def main():
             else:
                 decay.append(param)
 
-    # fused AdamW
-    optimizer = optim.AdamW([
-        {'params': decay, 'weight_decay': 0.01},
-        {'params': no_decay, 'weight_decay': 0}
-    ], lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-8, fused=True)
+    # fused AdamW may fail with mixed layouts under DDP; keep fused for single-GPU CUDA.
+    adamw_kwargs = {
+        'lr': args.learning_rate,
+        'betas': (0.9, 0.999),
+        'eps': 1e-8,
+    }
+    if str(args.device) == 'cuda' and not args.distributed.use_ddp:
+        adamw_kwargs['fused'] = True
+    optimizer = optim.AdamW(
+        [
+            {'params': decay, 'weight_decay': 0.01},
+            {'params': no_decay, 'weight_decay': 0},
+        ],
+        **adamw_kwargs,
+    )
 
     # cosine scheduler for lr warmup and AMP
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)

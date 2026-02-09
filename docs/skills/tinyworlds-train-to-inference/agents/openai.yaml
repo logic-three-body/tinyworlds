@@ -1,3 +1,4 @@
 interface:
-  display_name: "Tinyworlds Train to Inference"
-  short_description: "Help with Tinyworlds Train to Inference tasks"
+  display_name: "TinyWorlds Train to Inference"
+  short_description: "Closed-loop training and inference gate validator"
+  default_prompt: "Use $tinyworlds-train-to-inference to run gated training, inference validation, and automatic dynamics retraining when inference fails."

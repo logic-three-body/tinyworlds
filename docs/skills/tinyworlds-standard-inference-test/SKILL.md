@@ -71,6 +71,8 @@ Treat as pass when:
 - loop prints `Inferring frame ...`
 - terminal prints `Inference stats`
 - `inference_results/inference_results_gt_vs_pred_*.png` exists
+- `Mean Squared Error (GT vs Pred)` is printed and meets dataset gate:
+  - ZELDA default: `<= 0.03`
 
 Treat as warning when:
 - MP4 write fails due `openh264` library
@@ -79,6 +81,7 @@ Treat as warning when:
 Treat as fail when:
 - any checkpoint path cannot be loaded
 - crash before first inference step
+- MSE gate fails for target dataset (for ZELDA, `> 0.03`)
 
 ## Step 5: Tested Example (This Repo)
 

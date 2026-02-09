@@ -220,15 +220,26 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
     completed = 0
     retries = 0
     accepted_ckpt = None
+    warm_start_ckpt = None
     if initial_checkpoint:
-        accepted_ckpt = resolve_latest_valid_checkpoint(initial_checkpoint)
-    initial_ckpt_resolved = accepted_ckpt
+        resolved = resolve_latest_valid_checkpoint(initial_checkpoint)
+        # dynamics supports absolute-step resume; other stages are warm-start only.
+        if stage == "dynamics":
+            accepted_ckpt = resolved
+        else:
+            warm_start_ckpt = resolved
+    initial_ckpt_resolved = accepted_ckpt or warm_start_ckpt
     gates = []
 
     while completed < target:
         gate_updates = min(chunk, target - completed)
-        start_step = step_from_name(Path(accepted_ckpt).name) if accepted_ckpt else -1
-        run_target = (start_step + 1 + gate_updates) if accepted_ckpt else gate_updates
+        if stage == "dynamics":
+            start_step = step_from_name(Path(accepted_ckpt).name) if accepted_ckpt else -1
+            run_target = (start_step + 1 + gate_updates) if accepted_ckpt else gate_updates
+        else:
+            # video/latent scripts interpret n_updates as a full loop length,
+            # so keep each gate as exactly gate_updates and load checkpoint as warm-start.
+            run_target = gate_updates
         vis_before = latest_visualization(stage, args.run_root)
         vis_before_mtime = vis_before.stat().st_mtime if vis_before else -1.0
         cmd = [
@@ -248,6 +259,8 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         ]
         if accepted_ckpt:
             cmd.append(f"checkpoint={accepted_ckpt}")
+        elif warm_start_ckpt and completed == 0:
+            cmd.append(f"checkpoint={warm_start_ckpt}")
         if stage == "dynamics":
             cmd.append(f"video_tokenizer_path={deps['video_tokenizer']}")
             cmd.append(f"latent_actions_path={deps['latent_actions']}")
@@ -471,9 +484,27 @@ def main():
     }
     deps = {}
     if args.only_stage == "all":
-        deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
-        deps["latent_actions"] = run_stage(args, "latent_actions", deps, report)
-        deps["dynamics"] = run_stage(args, "dynamics", deps, report)
+        deps["video_tokenizer"] = run_stage(
+            args,
+            "video_tokenizer",
+            deps,
+            report,
+            initial_checkpoint=args.video_checkpoint if args.video_checkpoint else None,
+        )
+        deps["latent_actions"] = run_stage(
+            args,
+            "latent_actions",
+            deps,
+            report,
+            initial_checkpoint=args.latent_checkpoint if args.latent_checkpoint else None,
+        )
+        deps["dynamics"] = run_stage(
+            args,
+            "dynamics",
+            deps,
+            report,
+            initial_checkpoint=args.dynamics_checkpoint if args.dynamics_checkpoint else None,
+        )
     elif args.only_stage == "video_tokenizer":
         deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
     elif args.only_stage == "latent_actions":

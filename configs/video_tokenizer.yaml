@@ -12,4 +12,4 @@ hidden_dim: 128
 num_blocks: 4
 
 # resume from checkpoint
-checkpoint:
+checkpoint: null
