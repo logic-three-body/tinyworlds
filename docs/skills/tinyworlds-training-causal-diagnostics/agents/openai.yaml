@@ -1,4 +1,4 @@
 interface:
   display_name: "TinyWorlds Auto Training Loop"
   short_description: "自动门禁训练 + 双卡/进程守卫"
-  default_prompt: "Use $tinyworlds-training-causal-diagnostics to run gate-based TinyWorlds training, auto-kill extra training processes, enforce dual-GPU runtime checks, and retune/restart until all stages pass."
+  default_prompt: "Use $tinyworlds-training-causal-diagnostics to run gate-based TinyWorlds training with stage batch floors (video=8, latent=8, dynamics=4), auto-kill extra training processes, enforce dual-GPU runtime checks, and retune/restart until all stages pass."

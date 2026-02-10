@@ -68,7 +68,10 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --repo-root . \
   --nproc-per-node 2 \
   --cleanup-extra-processes true \
-  --enforce-dual-gpu-check true
+  --enforce-dual-gpu-check true \
+  --video-min-batch-size 8 \
+  --latent-min-batch-size 8 \
+  --dynamics-min-batch-size 4
 ```
 
 For dynamics-only loop with fixed upstream checkpoints:
@@ -80,7 +83,8 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --enforce-dual-gpu-check true \
   --only-stage dynamics \
   --video-checkpoint results/<run>/video_tokenizer/checkpoints \
-  --latent-checkpoint results/<run>/latent_actions/checkpoints
+  --latent-checkpoint results/<run>/latent_actions/checkpoints \
+  --dynamics-min-batch-size 4
 ```
 
 For long continuation from an existing dynamics checkpoint (example to reach +124k updates):
@@ -98,7 +102,8 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --dynamics-chunk 4000 \
   --init-learning-rate 0.0005 \
   --init-grad-accum 2 \
-  --init-log-interval 1000
+  --init-log-interval 1000 \
+  --dynamics-min-batch-size 4
 ```
 
 ### Step 3: Export and Evaluate at Each Gate
@@ -123,7 +128,10 @@ Per gate, produce exactly one decision:
 
 Use mutation ladders in `references/auto-training-gates.md`.
 Runtime retune ladder (implemented by controller):
-- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`, minimum `1`).
+- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`) with stage floors:
+  - `video_tokenizer` floor `8`
+  - `latent_actions` floor `8`
+  - `dynamics` floor `4`
 - `video_tokenizer` gate fail: `learning_rate * 0.5`, `gradient_accumulation_steps + 1`, `log_interval` floor `500`.
 - `latent_actions` gate fail: `learning_rate * 0.8`, `log_interval` floor `250`.
 - `dynamics` gate fail: `learning_rate * 0.2`, `gradient_accumulation_steps - 1`, `log_interval` floor `500`.
@@ -158,12 +166,12 @@ After `dynamics` passes:
 5. Keep exactly one active training launcher; kill extras and keep the current run process only.
 6. For `nproc_per_node >= 2`, require dual-GPU runtime evidence, otherwise fail gate and retry.
 7. Training is not considered complete until standard inference gate passes.
-8. If retune falls to `batch_size_per_gpu=1`, mark run as degraded and log reason explicitly.
+8. If a stage reaches its minimum batch floor and still fails, mark run as degraded and log reason explicitly.
 9. Do not interpret chunk-local progress as global completion; completion follows absolute target step.
 
 ## Validated Example
 - Dual-GPU launcher/monitor success sample:
-  - command core: `auto_train_loop.py --nproc-per-node 2 --only-stage video_tokenizer --target-updates 200 --video-chunk 200 --cleanup-extra-processes true --enforce-dual-gpu-check true`
+  - command core: `auto_train_loop.py --nproc-per-node 2 --only-stage video_tokenizer --target-updates 200 --video-chunk 200 --cleanup-extra-processes true --enforce-dual-gpu-check true --video-min-batch-size 8`
   - report: `docs/action/auto-training-loop-report-2026_02_09_19_10_35.md`
   - gate evidence: `decision watch`, `launcher <pid>`, `dual_gpu_ok True`.
 

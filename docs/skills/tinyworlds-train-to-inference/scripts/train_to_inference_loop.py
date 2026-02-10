@@ -267,6 +267,15 @@ def run_auto_train_loop(
         cmd += ["--init-grad-accum", str(args.init_grad_accum)]
     if args.init_batch_size is not None:
         cmd += ["--init-batch-size", str(args.init_batch_size)]
+    if args.video_init_batch_size is not None:
+        cmd += ["--video-init-batch-size", str(args.video_init_batch_size)]
+    if args.latent_init_batch_size is not None:
+        cmd += ["--latent-init-batch-size", str(args.latent_init_batch_size)]
+    if args.dynamics_init_batch_size is not None:
+        cmd += ["--dynamics-init-batch-size", str(args.dynamics_init_batch_size)]
+    cmd += ["--video-min-batch-size", str(args.video_min_batch_size)]
+    cmd += ["--latent-min-batch-size", str(args.latent_min_batch_size)]
+    cmd += ["--dynamics-min-batch-size", str(args.dynamics_min_batch_size)]
     if args.init_log_interval is not None:
         cmd += ["--init-log-interval", str(args.init_log_interval)]
 
@@ -425,6 +434,7 @@ def write_report(report_path, report):
         f"- monitor_interval_sec: `{report.get('monitor_interval_sec')}`",
         f"- gpu_util_threshold: `{report.get('gpu_util_threshold')}`",
         f"- gpu_required_samples: `{report.get('gpu_required_samples')}`",
+        f"- min_batch_size(video/latent/dynamics): `{report.get('min_batch_size')}`",
         "",
         "## Checkpoints",
         f"- video_tokenizer: `{report['checkpoints']['video_tokenizer']}`",
@@ -615,6 +625,12 @@ def parse_args():
     parser.add_argument("--init-learning-rate", type=float, default=None)
     parser.add_argument("--init-grad-accum", type=int, default=None)
     parser.add_argument("--init-batch-size", type=int, default=None)
+    parser.add_argument("--video-init-batch-size", type=int, default=None)
+    parser.add_argument("--latent-init-batch-size", type=int, default=None)
+    parser.add_argument("--dynamics-init-batch-size", type=int, default=None)
+    parser.add_argument("--video-min-batch-size", type=int, default=1)
+    parser.add_argument("--latent-min-batch-size", type=int, default=8)
+    parser.add_argument("--dynamics-min-batch-size", type=int, default=4)
     parser.add_argument("--init-log-interval", type=int, default=None)
 
     parser.add_argument("--dataset", default="ZELDA")
@@ -695,6 +711,11 @@ def main():
         "monitor_interval_sec": args.monitor_interval_sec,
         "gpu_util_threshold": args.gpu_util_threshold,
         "gpu_required_samples": args.gpu_required_samples,
+        "min_batch_size": {
+            "video_tokenizer": max(1, int(args.video_min_batch_size)),
+            "latent_actions": max(1, int(args.latent_min_batch_size)),
+            "dynamics": max(1, int(args.dynamics_min_batch_size)),
+        },
     }
 
     report["history_audit"] = run_git_audit(args, repo_root, env, timestamp)

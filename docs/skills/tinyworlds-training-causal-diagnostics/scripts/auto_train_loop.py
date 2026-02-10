@@ -527,11 +527,13 @@ def stage_config(stage, args):
     return mapping[stage]
 
 
-def retune(stage, tune, reason="gate_fail"):
+def retune(stage, tune, reason="gate_fail", min_batch_size=1):
     if reason == "runtime_error":
         # First response to runtime failures (e.g. OOM): reduce per-GPU batch.
-        if tune["batch_size_per_gpu"] > 1:
-            tune["batch_size_per_gpu"] = max(1, tune["batch_size_per_gpu"] // 2)
+        if tune["batch_size_per_gpu"] > int(min_batch_size):
+            tune["batch_size_per_gpu"] = max(
+                int(min_batch_size), tune["batch_size_per_gpu"] // 2
+            )
             return tune
     if reason == "gpu_guard_fail":
         # Process/GPU guard failures are usually orchestration issues; keep optimizer knobs unchanged.
@@ -563,8 +565,14 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         ),
         "log_interval": int(read_yaml_scalar(cfg_path, "log_interval", 1000)),
     }
+    stage_init_batch = args.init_batch_by_stage.get(stage)
+    stage_min_batch = int(args.min_batch_by_stage.get(stage, 1))
+    tune["batch_size_per_gpu"] = max(stage_min_batch, tune["batch_size_per_gpu"])
+
     if args.init_batch_size is not None:
-        tune["batch_size_per_gpu"] = int(args.init_batch_size)
+        tune["batch_size_per_gpu"] = max(stage_min_batch, int(args.init_batch_size))
+    if stage_init_batch is not None:
+        tune["batch_size_per_gpu"] = max(stage_min_batch, int(stage_init_batch))
     if args.init_learning_rate is not None:
         tune["learning_rate"] = float(args.init_learning_rate)
     if args.init_grad_accum is not None:
@@ -653,7 +661,12 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
                 raise RuntimeError(
                     f"{stage}: exceeded max retries ({args.max_retries}) after runtime errors"
                 )
-            tune = retune(stage, tune, reason="runtime_error")
+            tune = retune(
+                stage,
+                tune,
+                reason="runtime_error",
+                min_batch_size=stage_min_batch,
+            )
             continue
         if runtime_monitor.get("dual_gpu_check_enabled") and not runtime_monitor.get("dual_gpu_ok"):
             retries += 1
@@ -670,7 +683,12 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
                 raise RuntimeError(
                     f"{stage}: exceeded max retries ({args.max_retries}) after dual-GPU guard failures"
                 )
-            tune = retune(stage, tune, reason="gpu_guard_fail")
+            tune = retune(
+                stage,
+                tune,
+                reason="gpu_guard_fail",
+                min_batch_size=stage_min_batch,
+            )
             continue
 
         stage_ckpt_dir = Path(args.run_root) / stage / "checkpoints"
@@ -687,7 +705,12 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             )
             if retries > args.max_retries:
                 raise RuntimeError(f"{stage}: exceeded max retries with invalid checkpoints")
-            tune = retune(stage, tune, reason="gate_fail")
+            tune = retune(
+                stage,
+                tune,
+                reason="gate_fail",
+                min_batch_size=stage_min_batch,
+            )
             continue
 
         vis_after = latest_visualization(stage, args.run_root)
@@ -706,7 +729,12 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             )
             if retries > args.max_retries:
                 raise RuntimeError(f"{stage}: exceeded max retries with stale visualizations")
-            tune = retune(stage, tune, reason="gate_fail")
+            tune = retune(
+                stage,
+                tune,
+                reason="gate_fail",
+                min_batch_size=stage_min_batch,
+            )
             continue
 
         run_dir = find_new_wandb_run(args.repo_root, start)
@@ -750,12 +778,18 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         retries += 1
         if retries > args.max_retries:
             raise RuntimeError(f"{stage}: exceeded max retries ({args.max_retries})")
-        tune = retune(stage, tune, reason="gate_fail")
+        tune = retune(
+            stage,
+            tune,
+            reason="gate_fail",
+            min_batch_size=stage_min_batch,
+        )
 
     report["stages"][stage] = {
         "target_updates": target,
         "initial_completed_updates": initial_completed_updates,
         "chunk_size": chunk,
+        "min_batch_size": stage_min_batch,
         "initial_checkpoint": initial_ckpt_resolved,
         "final_checkpoint": accepted_ckpt,
         "stage_run_id": accepted_run_id,
@@ -773,12 +807,14 @@ def write_report(report_path, report):
     lines.append(f"- cleanup_extra_processes: `{report.get('cleanup_extra_processes')}`")
     lines.append(f"- enforce_dual_gpu_check: `{report.get('enforce_dual_gpu_check')}`")
     lines.append(f"- monitor_interval_sec: `{report.get('monitor_interval_sec')}`")
+    lines.append(f"- min_batch_by_stage: `{report.get('min_batch_by_stage')}`")
     lines.append("")
     for stage, data in report["stages"].items():
         lines.append(f"## {stage}")
         lines.append(f"- target_updates: `{data['target_updates']}`")
         lines.append(f"- initial_completed_updates: `{data.get('initial_completed_updates', 0)}`")
         lines.append(f"- chunk_size: `{data['chunk_size']}`")
+        lines.append(f"- min_batch_size: `{data.get('min_batch_size')}`")
         lines.append(f"- initial_checkpoint: `{data.get('initial_checkpoint')}`")
         lines.append(f"- final_checkpoint: `{data['final_checkpoint']}`")
         lines.append(f"- stage_run_id: `{data.get('stage_run_id')}`")
@@ -865,6 +901,42 @@ def parse_args():
         help="Override initial batch_size_per_gpu before auto retune",
     )
     ap.add_argument(
+        "--video-init-batch-size",
+        type=int,
+        default=None,
+        help="Stage-specific initial batch size override for video_tokenizer",
+    )
+    ap.add_argument(
+        "--latent-init-batch-size",
+        type=int,
+        default=None,
+        help="Stage-specific initial batch size override for latent_actions",
+    )
+    ap.add_argument(
+        "--dynamics-init-batch-size",
+        type=int,
+        default=None,
+        help="Stage-specific initial batch size override for dynamics",
+    )
+    ap.add_argument(
+        "--video-min-batch-size",
+        type=int,
+        default=1,
+        help="Minimum allowed batch_size_per_gpu for video_tokenizer runtime-error retune",
+    )
+    ap.add_argument(
+        "--latent-min-batch-size",
+        type=int,
+        default=8,
+        help="Minimum allowed batch_size_per_gpu for latent_actions runtime-error retune",
+    )
+    ap.add_argument(
+        "--dynamics-min-batch-size",
+        type=int,
+        default=4,
+        help="Minimum allowed batch_size_per_gpu for dynamics runtime-error retune",
+    )
+    ap.add_argument(
         "--init-log-interval",
         type=int,
         default=None,
@@ -905,6 +977,16 @@ def main():
         "latent_actions": args.latent_chunk,
         "dynamics": args.dynamics_chunk,
     }
+    args.init_batch_by_stage = {
+        "video_tokenizer": args.video_init_batch_size,
+        "latent_actions": args.latent_init_batch_size,
+        "dynamics": args.dynamics_init_batch_size,
+    }
+    args.min_batch_by_stage = {
+        "video_tokenizer": max(1, int(args.video_min_batch_size)),
+        "latent_actions": max(1, int(args.latent_min_batch_size)),
+        "dynamics": max(1, int(args.dynamics_min_batch_size)),
+    }
 
     report = {
         "timestamp": ts,
@@ -913,6 +995,7 @@ def main():
         "cleanup_extra_processes": bool(args.cleanup_extra_processes),
         "enforce_dual_gpu_check": bool(args.enforce_dual_gpu_check),
         "monitor_interval_sec": float(args.monitor_interval_sec),
+        "min_batch_by_stage": dict(args.min_batch_by_stage),
         "stages": {},
     }
     deps = {}

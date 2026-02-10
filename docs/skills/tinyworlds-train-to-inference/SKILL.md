@@ -56,7 +56,10 @@ If effective batch changes after auto-retune, record the change in report/retros
 | latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
 | dynamics | 4 | 2 | 5e-4 | 4000 | 300000 |
 
-When runtime/OOM instability appears, allow controller retune to reduce `batch_size_per_gpu` (8->4->2->1).
+When runtime/OOM instability appears, use stage floors for runtime retune:
+- `video_tokenizer`: `8 -> floor 8` (do not reduce below 8)
+- `latent_actions`: `8 -> floor 8`
+- `dynamics`: `8/4 -> floor 4`
 
 ## Command Templates
 ### Quick Smoke (fast closed-loop sanity)
@@ -79,6 +82,9 @@ python docs/skills/tinyworlds-train-to-inference/scripts/train_to_inference_loop
   --monitor-interval-sec 5 \
   --gpu-util-threshold 1 \
   --gpu-required-samples 2 \
+  --video-min-batch-size 8 \
+  --latent-min-batch-size 8 \
+  --dynamics-min-batch-size 4 \
   --max-mse 0.03 \
   --max-inference-retries 2 \
   --enable-wandb-analysis true \
@@ -99,6 +105,7 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --video-chunk 5000 \
   --target-updates 40000 \
   --init-batch-size 8 \
+  --video-min-batch-size 8 \
   --init-grad-accum 2 \
   --init-learning-rate 0.0003 \
   --init-log-interval 500 \
@@ -116,6 +123,7 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --latent-chunk 2000 \
   --target-updates 10000 \
   --init-batch-size 8 \
+  --latent-min-batch-size 8 \
   --init-grad-accum 1 \
   --init-learning-rate 0.0001 \
   --init-log-interval 500 \
@@ -135,6 +143,7 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --dynamics-chunk 4000 \
   --target-updates 300000 \
   --init-batch-size 4 \
+  --dynamics-min-batch-size 4 \
   --init-grad-accum 2 \
   --init-learning-rate 0.0005 \
   --init-log-interval 1000
@@ -173,7 +182,10 @@ If inference fails:
 
 ### Training runtime/gate failure
 Controller retune ladder:
-- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`, floor `1`).
+- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`) with stage floors:
+  - `video_tokenizer` floor `8`
+  - `latent_actions` floor `8`
+  - `dynamics` floor `4`
 - `video_tokenizer` gate fail: `learning_rate * 0.5`, `grad_accum + 1`, `log_interval` down to floor `500`.
 - `latent_actions` gate fail: `learning_rate * 0.8`, `log_interval` down to floor `250`.
 - `dynamics` gate fail: `learning_rate * 0.2`, `grad_accum - 1`, `log_interval` down to floor `500`.
@@ -202,7 +214,7 @@ Controller retune ladder:
 5. Keep exactly one active training launcher per chunk; terminate extra stage processes immediately.
 6. For dual-GPU default (`nproc_per_node=2`), require evidence that both GPUs were active.
 7. Use absolute-step resume semantics for chunked runs; do not reset logical progress per chunk.
-8. If stage retunes to `batch_size_per_gpu=1`, mark run status as `degraded` and record cause in retrospective.
+8. If any stage hits its minimum batch floor and still fails gate, mark run status as `degraded` and record cause in retrospective.
 9. Always report effective batch and parameter changes across retries.
 
 ## Validated Example (v2)
