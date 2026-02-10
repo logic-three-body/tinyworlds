@@ -1,4 +1,4 @@
 interface:
   display_name: "TinyWorlds Train to Inference"
-  short_description: "闭环训练推理 + 双卡进程守卫"
-  default_prompt: "Use $tinyworlds-train-to-inference to stop stale/extra training processes, enforce dual-GPU monitored training, run git evidence audit, execute full gated training, validate inference, auto-retrain dynamics on failure, and generate W&B/API-first analysis reports."
+  short_description: "长跑闭环训练推理 + 双卡守卫 + 参数自适应"
+  default_prompt: "Use $tinyworlds-train-to-inference to run ZELDA closed-loop training and inference with long-run safe-start parameters, absolute-step checkpoint resume, dual-GPU process guard, git evidence audit, W&B/local analysis, and runtime retune ladders until inference gate criteria are met."

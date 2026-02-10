@@ -35,9 +35,32 @@ Use stage scripts directly:
 - `scripts/train_dynamics.py`
 
 Pass overrides via CLI for each chunk:
-- `n_updates=<chunk_updates>`
+- `n_updates=<absolute_target_updates_for_this_chunk>` (absolute-step resume semantics)
 - `checkpoint=<best_checkpoint_or_null>`
 - keep stage-specific config path + `--training_config configs/training.yaml`
+
+Resume support by stage:
+- `--only-stage video_tokenizer` accepts `--video-checkpoint`.
+- `--only-stage latent_actions` accepts `--latent-checkpoint`.
+- `--only-stage dynamics` requires both `--video-checkpoint` and `--latent-checkpoint` (optional `--dynamics-checkpoint`).
+
+### Stage Parameter Profiles
+Config baseline (`configs/*.yaml`):
+| Stage | batch_size_per_gpu | grad_accum | learning_rate | log_interval | n_updates |
+|---|---:|---:|---:|---:|---:|
+| video_tokenizer | 16 | 2 | 1e-3 | 2500 | 40000 |
+| latent_actions | 16 | 1 | 1e-4 | 500 | 10000 |
+| dynamics | 8 | 2 | 5e-4 | 1000 | 300000 |
+
+Long-run safe start (recommended):
+| Stage | batch_size_per_gpu | grad_accum | learning_rate | chunk | target_updates |
+|---|---:|---:|---:|---:|---:|
+| video_tokenizer | 8 | 2 | 3e-4 | 5000 | 40000 |
+| latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
+| dynamics | 4 | 2 | 5e-4 | 4000 | 300000 |
+
+Track and report:
+- `effective_batch = batch_size_per_gpu * gradient_accumulation_steps * nproc_per_node`
 
 If user asks for unattended execution, prefer running:
 ```bash
@@ -99,6 +122,11 @@ Per gate, produce exactly one decision:
 - `restart_stage`: severe collapse or unusable checkpoints; restart stage from stable checkpoint or fresh.
 
 Use mutation ladders in `references/auto-training-gates.md`.
+Runtime retune ladder (implemented by controller):
+- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`, minimum `1`).
+- `video_tokenizer` gate fail: `learning_rate * 0.5`, `gradient_accumulation_steps + 1`, `log_interval` floor `500`.
+- `latent_actions` gate fail: `learning_rate * 0.8`, `log_interval` floor `250`.
+- `dynamics` gate fail: `learning_rate * 0.2`, `gradient_accumulation_steps - 1`, `log_interval` floor `500`.
 
 ### Step 5: Convergence and Handoff
 A stage is complete only when:
@@ -130,6 +158,8 @@ After `dynamics` passes:
 5. Keep exactly one active training launcher; kill extras and keep the current run process only.
 6. For `nproc_per_node >= 2`, require dual-GPU runtime evidence, otherwise fail gate and retry.
 7. Training is not considered complete until standard inference gate passes.
+8. If retune falls to `batch_size_per_gpu=1`, mark run as degraded and log reason explicitly.
+9. Do not interpret chunk-local progress as global completion; completion follows absolute target step.
 
 ## Validated Example
 - Dual-GPU launcher/monitor success sample:

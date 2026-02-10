@@ -572,30 +572,24 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
     if args.init_log_interval is not None:
         tune["log_interval"] = int(args.init_log_interval)
     chunk = int(args.chunk_size.get(stage, 1000))
-    completed = 0
     retries = 0
     accepted_ckpt = None
-    warm_start_ckpt = None
     if initial_checkpoint:
         resolved = resolve_latest_valid_checkpoint(initial_checkpoint)
-        # dynamics supports absolute-step resume; other stages are warm-start only.
-        if stage == "dynamics":
-            accepted_ckpt = resolved
-        else:
-            warm_start_ckpt = resolved
-    initial_ckpt_resolved = accepted_ckpt or warm_start_ckpt
+        accepted_ckpt = resolved
+    initial_ckpt_resolved = accepted_ckpt
+    completed = 0
+    if accepted_ckpt:
+        ckpt_step = step_from_name(Path(accepted_ckpt).name)
+        if ckpt_step >= 0:
+            completed = ckpt_step + 1
+    initial_completed_updates = completed
     gates = []
     accepted_run_id = None
 
     while completed < target:
         gate_updates = min(chunk, target - completed)
-        if stage == "dynamics":
-            start_step = step_from_name(Path(accepted_ckpt).name) if accepted_ckpt else -1
-            run_target = (start_step + 1 + gate_updates) if accepted_ckpt else gate_updates
-        else:
-            # video/latent scripts interpret n_updates as a full loop length,
-            # so keep each gate as exactly gate_updates and load checkpoint as warm-start.
-            run_target = gate_updates
+        run_target = completed + gate_updates
         vis_before = latest_visualization(stage, args.run_root)
         vis_before_mtime = vis_before.stat().st_mtime if vis_before else -1.0
         if int(args.nproc_per_node) <= 1:
@@ -632,8 +626,6 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
             ]
         if accepted_ckpt:
             cmd.append(f"checkpoint={accepted_ckpt}")
-        elif warm_start_ckpt and completed == 0:
-            cmd.append(f"checkpoint={warm_start_ckpt}")
         if stage == "dynamics":
             cmd.append(f"video_tokenizer_path={deps['video_tokenizer']}")
             cmd.append(f"latent_actions_path={deps['latent_actions']}")
@@ -731,7 +723,7 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         decision = verdict.get("decision", "retune")
 
         gate_info = {
-            "gate": completed + gate_updates,
+            "gate": run_target,
             "decision": decision,
             "csv": str(csv_path),
             "latest_valid_checkpoint": str(latest_valid),
@@ -747,7 +739,11 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
         if decision in ("continue", "watch"):
             accepted_ckpt = str(latest_valid)
             accepted_run_id = gate_info["wandb_run_id"]
-            completed += gate_updates
+            latest_step = step_from_name(Path(accepted_ckpt).name)
+            if latest_step >= 0:
+                completed = max(completed + gate_updates, latest_step + 1)
+            else:
+                completed += gate_updates
             retries = 0
             continue
 
@@ -758,6 +754,7 @@ def run_stage(args, stage, deps, report, initial_checkpoint=None):
 
     report["stages"][stage] = {
         "target_updates": target,
+        "initial_completed_updates": initial_completed_updates,
         "chunk_size": chunk,
         "initial_checkpoint": initial_ckpt_resolved,
         "final_checkpoint": accepted_ckpt,
@@ -780,6 +777,7 @@ def write_report(report_path, report):
     for stage, data in report["stages"].items():
         lines.append(f"## {stage}")
         lines.append(f"- target_updates: `{data['target_updates']}`")
+        lines.append(f"- initial_completed_updates: `{data.get('initial_completed_updates', 0)}`")
         lines.append(f"- chunk_size: `{data['chunk_size']}`")
         lines.append(f"- initial_checkpoint: `{data.get('initial_checkpoint')}`")
         lines.append(f"- final_checkpoint: `{data['final_checkpoint']}`")
@@ -941,9 +939,21 @@ def main():
             initial_checkpoint=args.dynamics_checkpoint if args.dynamics_checkpoint else None,
         )
     elif args.only_stage == "video_tokenizer":
-        deps["video_tokenizer"] = run_stage(args, "video_tokenizer", deps, report)
+        deps["video_tokenizer"] = run_stage(
+            args,
+            "video_tokenizer",
+            deps,
+            report,
+            initial_checkpoint=args.video_checkpoint if args.video_checkpoint else None,
+        )
     elif args.only_stage == "latent_actions":
-        deps["latent_actions"] = run_stage(args, "latent_actions", deps, report)
+        deps["latent_actions"] = run_stage(
+            args,
+            "latent_actions",
+            deps,
+            report,
+            initial_checkpoint=args.latent_checkpoint if args.latent_checkpoint else None,
+        )
     elif args.only_stage == "dynamics":
         if not args.video_checkpoint or not args.latent_checkpoint:
             raise ValueError(

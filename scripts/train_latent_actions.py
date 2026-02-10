@@ -62,13 +62,16 @@ def main():
         num_blocks=args.num_blocks,
         n_actions=args.n_actions,
     ).to(args.device)
+    start_step = 0
+    state_cfg = {}
     if args.checkpoint:
-        model, _ = load_latent_actions_from_checkpoint(
+        model, state_cfg = load_latent_actions_from_checkpoint(
             args.checkpoint, 
             args.device,
             model,
             dist_setup['is_distributed'],
         )
+        start_step = int((state_cfg or {}).get('step') or 0) + 1
 
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(model, "LatentActionModel", is_main)
@@ -112,10 +115,37 @@ def main():
 
     # cosine scheduler for lr warmup and AMP
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)
+    if args.checkpoint and os.path.isdir(args.checkpoint):
+        optim_path = os.path.join(args.checkpoint, 'optim_state_dict.pt')
+        if os.path.isfile(optim_path):
+            try:
+                optimizer.load_state_dict(
+                    torch.load(optim_path, map_location='cpu', weights_only=False)
+                )
+            except ValueError as exc:
+                if is_main:
+                    print(
+                        f"[WARN] Optimizer state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                        "Continuing with freshly initialized optimizer."
+                    )
+        for group in optimizer.param_groups:
+            group['lr'] = float(args.learning_rate)
+        scheduler_state = (state_cfg or {}).get('scheduler_state_dict')
+        if scheduler_state is not None:
+            try:
+                scheduler.load_state_dict(scheduler_state)
+            except Exception as exc:
+                if is_main:
+                    print(
+                        f"[WARN] Scheduler state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                        "Continuing with freshly initialized scheduler."
+                    )
+        if hasattr(scheduler, 'base_lrs'):
+            scheduler.base_lrs = [float(args.learning_rate) for _ in scheduler.base_lrs]
     train_ctx = torch.amp.autocast(args.device, enabled=True, dtype=torch.bfloat16) if args.amp and not args.distributed.use_fsdp else nullcontext()
 
     results = {
-        'n_updates': 0,
+        'n_updates': start_step,
         'loss_vals': [],
     }
 
@@ -129,7 +159,7 @@ def main():
     unwrap_model(model).train()
 
     train_iter = iter(training_loader)
-    for i in tqdm(range(args.n_updates), disable=not is_main):
+    for i in tqdm(range(start_step, args.n_updates), disable=not is_main):
         optimizer.zero_grad(set_to_none=True)
         if isinstance(model, FSDPModule):
             model.set_requires_gradient_sync(False)
@@ -186,12 +216,44 @@ def main():
                 log_action_distribution(idx, i, args.n_actions)
 
             hyperparameters = vars(args)
-            save_training_state(model, optimizer, None, hyperparameters, checkpoints_dir, prefix='latent_actions', step=i)
+            save_training_state(
+                model,
+                optimizer,
+                scheduler,
+                hyperparameters,
+                checkpoints_dir,
+                prefix='latent_actions',
+                step=i,
+            )
             if is_main:
                 save_path = os.path.join(visualizations_dir, f'reconstructions_latent_actions_step_{i}.png')
                 visualize_reconstruction(x, pred_frames, save_path)
-            
-                print('\n Step', i, 'Loss:', loss.item(), 'Codebook Usage:', codebook_usage, 'Encoder Variance:', z_e_var, 'Decoder Variance:', pred_frames_var)
+
+                loss_window = results['loss_vals'][-max(1, args.log_interval):]
+                loss_avg = torch.mean(torch.stack(loss_window)).item()
+                if args.use_wandb:
+                    print('\n Step', i, 'Loss:', loss_avg, 'Codebook Usage:', codebook_usage, 'Encoder Variance:', z_e_var, 'Decoder Variance:', pred_frames_var)
+                else:
+                    print('\n Step', i, 'Loss:', loss_avg)
+
+    final_step = args.n_updates - 1
+    need_final_save = final_step >= start_step and (final_step % args.log_interval != 0)
+    if need_final_save:
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        if is_main:
+            hyperparameters = vars(args)
+            save_training_state(
+                model,
+                optimizer,
+                scheduler,
+                hyperparameters,
+                checkpoints_dir,
+                prefix='latent_actions',
+                step=final_step,
+            )
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     # finish wandb
     if args.use_wandb and is_main:

@@ -29,9 +29,37 @@ Before running the loop, enforce cross-stage backbone alignment (following `d574
 
 Do not keep stale hardcoded checkpoint paths in `configs/dynamics.yaml`; prefer CLI/runtime injection.
 
-## Single Command (Recommended)
-Run from repo root:
+## Three-Stage Parameter Policy
+### Priority
+Use this order for effective training params:
+1. CLI explicit overrides (`--init-*`, stage-specific command args).
+2. Resume checkpoint state (`optimizer/scheduler` + `step`).
+3. `configs/*.yaml` defaults.
 
+### Effective Batch
+Always track:
+- `effective_batch = batch_size_per_gpu * gradient_accumulation_steps * nproc_per_node`
+
+If effective batch changes after auto-retune, record the change in report/retrospective.
+
+### Config Baseline (from current configs)
+| Stage | batch_size_per_gpu | grad_accum | learning_rate | log_interval | n_updates |
+|---|---:|---:|---:|---:|---:|
+| video_tokenizer | 16 | 2 | 1e-3 | 2500 | 40000 |
+| latent_actions | 16 | 1 | 1e-4 | 500 | 10000 |
+| dynamics | 8 | 2 | 5e-4 | 1000 | 300000 |
+
+### Long-Run Safe Start (recommended)
+| Stage | batch_size_per_gpu | grad_accum | learning_rate | chunk | target_updates |
+|---|---:|---:|---:|---:|---:|
+| video_tokenizer | 8 | 2 | 3e-4 | 5000 | 40000 |
+| latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
+| dynamics | 4 | 2 | 5e-4 | 4000 | 300000 |
+
+When runtime/OOM instability appears, allow controller retune to reduce `batch_size_per_gpu` (8->4->2->1).
+
+## Command Templates
+### Quick Smoke (fast closed-loop sanity)
 ```bash
 python docs/skills/tinyworlds-train-to-inference/scripts/train_to_inference_loop.py \
   --repo-root . \
@@ -59,6 +87,59 @@ python docs/skills/tinyworlds-train-to-inference/scripts/train_to_inference_loop
   --history-audit-mode strict
 ```
 
+### Long-Run Staged Recipe (strict AR preparation)
+Stage A: tokenizer long-run
+```bash
+python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
+  --repo-root . \
+  --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true \
+  --only-stage video_tokenizer \
+  --video-chunk 5000 \
+  --target-updates 40000 \
+  --init-batch-size 8 \
+  --init-grad-accum 2 \
+  --init-learning-rate 0.0003 \
+  --init-log-interval 500 \
+  --video-checkpoint results/<run>/video_tokenizer/checkpoints
+```
+
+Stage B/C: latent and dynamics long-run
+```bash
+python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
+  --repo-root . \
+  --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true \
+  --only-stage latent_actions \
+  --latent-chunk 2000 \
+  --target-updates 10000 \
+  --init-batch-size 8 \
+  --init-grad-accum 1 \
+  --init-learning-rate 0.0001 \
+  --init-log-interval 500 \
+  --latent-checkpoint results/<run>/latent_actions/checkpoints
+```
+
+```bash
+python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loop.py \
+  --repo-root . \
+  --nproc-per-node 2 \
+  --cleanup-extra-processes true \
+  --enforce-dual-gpu-check true \
+  --only-stage dynamics \
+  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint results/<run>/latent_actions/checkpoints \
+  --dynamics-checkpoint results/<run>/dynamics/checkpoints \
+  --dynamics-chunk 4000 \
+  --target-updates 300000 \
+  --init-batch-size 4 \
+  --init-grad-accum 2 \
+  --init-learning-rate 0.0005 \
+  --init-log-interval 1000
+```
+
 ## Inference Pass/Fail Gate
 Pass only when all conditions hold:
 - `scripts/run_inference.py` exits successfully.
@@ -71,13 +152,31 @@ Pass only when all conditions hold:
 
 Fail when any condition above is missing.
 
-## Retune Policy on Inference Failure
+## Runtime Monitoring (required)
+During long runs, monitor all three channels:
+1. W&B and exported local history (`Logs/*history*.csv|json`).
+2. Checkpoint progression (`results/<run>/<stage>/checkpoints/*_step_*`).
+3. Visualization freshness (`results/<run>/<stage>/visualizations/*.png`).
+
+Optional 4-hour watch process output:
+- `Logs/monitor_4h_latest.info`
+- `Logs/monitor_4h_*.log`
+
+## Retune Policy
+### Inference failure
 If inference fails:
 1. Continue from latest valid `dynamics` checkpoint.
 2. Increase dynamics target updates by one retry chunk (default `+2000`).
 3. Lower dynamics init LR each retry (`retry_init_learning_rate * retry_lr_decay`).
 4. Re-run inference gate.
 5. Stop when pass or retry budget reached.
+
+### Training runtime/gate failure
+Controller retune ladder:
+- Runtime error/OOM: reduce `batch_size_per_gpu` first (`/2`, floor `1`).
+- `video_tokenizer` gate fail: `learning_rate * 0.5`, `grad_accum + 1`, `log_interval` down to floor `500`.
+- `latent_actions` gate fail: `learning_rate * 0.8`, `log_interval` down to floor `250`.
+- `dynamics` gate fail: `learning_rate * 0.2`, `grad_accum - 1`, `log_interval` down to floor `500`.
 
 ## Artifacts
 - Runtime report:
@@ -95,16 +194,6 @@ If inference fails:
 - Inference outputs:
   - `inference_results/*.png`
 
-## W&B Analysis Template
-Use stage plots below:
-1. `video_tokenizer`: `train/loss`, `train/codebook_usage`, `learning_rate/group_0`.
-2. `latent_actions`: `train/loss`, `action_entropy + unique_actions`, `latent_actions/codebook_usage`, `learning_rate/group_0`.
-3. `dynamics`: `train/loss (+rolling)`, `first10/last10 loss`, `action_entropy + unique_actions`, `learning_rate/group_0`.
-
-Data source priority:
-1. W&B API (`wandb.Api`) with stage run IDs.
-2. Local `Logs/*history*.csv|json` fallback if API is unavailable.
-
 ## Hard Rules
 1. Default to full pipeline (`--train-stage all`) for closed-loop validation.
 2. Default to `--checkpoint-policy fresh` for clean run unless user requests warm start.
@@ -112,7 +201,9 @@ Data source priority:
 4. Closed-loop pass requires all reports: train-to-inference report, retrospective, git evidence, W&B analysis.
 5. Keep exactly one active training launcher per chunk; terminate extra stage processes immediately.
 6. For dual-GPU default (`nproc_per_node=2`), require evidence that both GPUs were active.
-7. Keep cross-stage backbone aligned and avoid stale hardcoded checkpoint paths in configs.
+7. Use absolute-step resume semantics for chunked runs; do not reset logical progress per chunk.
+8. If stage retunes to `batch_size_per_gpu=1`, mark run status as `degraded` and record cause in retrospective.
+9. Always report effective batch and parameter changes across retries.
 
 ## Validated Example (v2)
 - Teacher-forced closed-loop pass (single GPU):

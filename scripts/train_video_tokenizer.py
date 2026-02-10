@@ -64,13 +64,16 @@ def main():
         latent_dim=args.latent_dim,
         num_bins=args.num_bins,
     ).to(args.device)
+    start_step = 0
+    state_cfg = {}
     if args.checkpoint:
-        model, _ = load_videotokenizer_from_checkpoint(
+        model, state_cfg = load_videotokenizer_from_checkpoint(
             args.checkpoint, 
             args.device,
             model,
             dist_setup['is_distributed'],
         )
+        start_step = int((state_cfg or {}).get('step') or 0) + 1
 
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(model, "VideoTokenizer", is_main)
@@ -111,13 +114,40 @@ def main():
         ],
         **adamw_kwargs,
     )
-    
+
     # cosine scheduler for lr warmup
     scheduler = create_cosine_scheduler(optimizer, args.n_updates)
+    if args.checkpoint and os.path.isdir(args.checkpoint):
+        optim_path = os.path.join(args.checkpoint, 'optim_state_dict.pt')
+        if os.path.isfile(optim_path):
+            try:
+                optimizer.load_state_dict(
+                    torch.load(optim_path, map_location='cpu', weights_only=False)
+                )
+            except ValueError as exc:
+                if is_main:
+                    print(
+                        f"[WARN] Optimizer state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                        "Continuing with freshly initialized optimizer."
+                    )
+        for group in optimizer.param_groups:
+            group['lr'] = float(args.learning_rate)
+        scheduler_state = (state_cfg or {}).get('scheduler_state_dict')
+        if scheduler_state is not None:
+            try:
+                scheduler.load_state_dict(scheduler_state)
+            except Exception as exc:
+                if is_main:
+                    print(
+                        f"[WARN] Scheduler state mismatch for checkpoint '{args.checkpoint}': {exc}. "
+                        "Continuing with freshly initialized scheduler."
+                    )
+        if hasattr(scheduler, 'base_lrs'):
+            scheduler.base_lrs = [float(args.learning_rate) for _ in scheduler.base_lrs]
     train_ctx = torch.amp.autocast(args.device, enabled=True, dtype=torch.bfloat16) if args.amp and not args.distributed.use_fsdp else nullcontext()
 
     results = {
-        'n_updates': 0,
+        'n_updates': start_step,
         'loss_vals': [],
     }
 
@@ -131,7 +161,7 @@ def main():
     unwrap_model(model).train()
 
     train_iter = iter(training_loader)
-    for i in tqdm(range(args.n_updates), disable=not is_main):
+    for i in tqdm(range(start_step, args.n_updates), disable=not is_main):
         optimizer.zero_grad(set_to_none=True)
         if isinstance(model, FSDPModule):
             model.set_requires_gradient_sync(False)
@@ -189,8 +219,28 @@ def main():
                 x_vis = x.detach().cpu()
                 save_path = os.path.join(visualizations_dir, f'video_tokenizer_recon_step_{i}.png')
                 visualize_reconstruction(x_vis[:16], x_hat_vis[:16], save_path)
-            
-                print('\n Step', i, 'Loss:', torch.mean(torch.stack(results["loss_vals"][-args.log_interval:])).item())
+
+                loss_window = results["loss_vals"][-max(1, args.log_interval):]
+                print('\n Step', i, 'Loss:', torch.mean(torch.stack(loss_window)).item())
+
+    final_step = args.n_updates - 1
+    need_final_save = final_step >= start_step and (final_step % args.log_interval != 0)
+    if need_final_save:
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        if is_main:
+            hyperparameters = args.__dict__
+            save_training_state(
+                model,
+                optimizer,
+                scheduler,
+                hyperparameters,
+                checkpoints_dir,
+                prefix='video_tokenizer',
+                step=final_step,
+            )
+        if dist_setup['is_distributed'] and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     # finish wandb
     if args.use_wandb and is_main:
