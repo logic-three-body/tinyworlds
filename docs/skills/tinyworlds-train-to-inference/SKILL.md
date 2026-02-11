@@ -47,19 +47,19 @@ If effective batch changes after auto-retune, record the change in report/retros
 |---|---:|---:|---:|---:|---:|
 | video_tokenizer | 16 | 2 | 1e-3 | 2500 | 40000 |
 | latent_actions | 16 | 1 | 1e-4 | 500 | 10000 |
-| dynamics | 8 | 2 | 5e-4 | 1000 | 300000 |
+| dynamics | 8 | 1 | 5e-4 | 1000 | 120000 |
 
 ### Long-Run Safe Start (recommended)
 | Stage | batch_size_per_gpu | grad_accum | learning_rate | chunk | target_updates |
 |---|---:|---:|---:|---:|---:|
 | video_tokenizer | 8 | 2 | 3e-4 | 5000 | 40000 |
 | latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
-| dynamics | 4 | 2 | 5e-4 | 4000 | 300000 |
+| dynamics | 8 | 1 | 5e-4 | 4000 | 120000 |
 
 When runtime/OOM instability appears, use stage floors for runtime retune:
 - `video_tokenizer`: `8 -> floor 8` (do not reduce below 8)
 - `latent_actions`: `8 -> floor 8`
-- `dynamics`: `8/4 -> floor 4`
+- `dynamics`: `8 -> floor 4`
 
 ## Command Templates
 ### Quick Smoke (fast closed-loop sanity)
@@ -141,10 +141,10 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --latent-checkpoint results/<run>/latent_actions/checkpoints \
   --dynamics-checkpoint results/<run>/dynamics/checkpoints \
   --dynamics-chunk 4000 \
-  --target-updates 300000 \
-  --init-batch-size 4 \
+  --target-updates 120000 \
+  --init-batch-size 8 \
   --dynamics-min-batch-size 4 \
-  --init-grad-accum 2 \
+  --init-grad-accum 1 \
   --init-learning-rate 0.0005 \
   --init-log-interval 1000
 ```
