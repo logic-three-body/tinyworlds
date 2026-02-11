@@ -20,7 +20,7 @@ def load_models(video_tokenizer_path, latent_actions_path, dynamics_path, device
     return video_tokenizer, latent_action_model, dynamics_model
 
 
-def visualize_inference(predicted_frames, ground_truth_frames, inferred_actions, fps, use_actions=True):
+def visualize_inference(predicted_frames, ground_truth_frames, inferred_actions, fps, use_actions=True, context_window=0):
     # Move to CPU and convert to numpy
     predicted_frames = predicted_frames.detach().cpu()
     ground_truth_frames = ground_truth_frames.detach().cpu()
@@ -82,11 +82,20 @@ def visualize_inference(predicted_frames, ground_truth_frames, inferred_actions,
     all_frames = torch.cat([ground_truth_frames, predicted_frames], dim=1)
     save_frames_as_mp4(all_frames, mp4_path, fps)
     
-    # Calculate and display reconstruction error
-    mse_error = torch.mean((predicted_frames - ground_truth_frames) ** 2).item()
+    # Calculate and display reconstruction error (generated-only is the primary gate metric).
+    full_mse_error = torch.mean((predicted_frames - ground_truth_frames) ** 2).item()
+    generated_mse_error = full_mse_error
+    if context_window > 0 and predicted_frames.shape[1] > context_window:
+        pred_generated = predicted_frames[:, context_window:]
+        gt_generated = ground_truth_frames[:, context_window:context_window + pred_generated.shape[1]]
+        generated_mse_error = torch.mean((pred_generated - gt_generated) ** 2).item()
+
     print(f"\nInference stats:")
     print(f"Total frames generated: {T}")
-    print(f"Mean Squared Error (GT vs Pred): {mse_error:.6f}")
+    print(f"Mean Squared Error (GT vs Pred): {generated_mse_error:.6f}")
+    if context_window > 0:
+        print(f"Mean Squared Error (GT vs Pred, full_with_context): {full_mse_error:.6f}")
+        print(f"Context window (non-generated frames): {context_window}")
     if use_actions:
         print(f"Actions used: {[action.item() for action in inferred_actions]}")
     else:
@@ -147,9 +156,13 @@ def get_action_latent(args, inferred_actions, n_actions, context_frames, latent_
     elif args.use_gt_actions: # use action tokenizer actions
         print("using gt actions")
         gt_action_latents = latent_action_model.encode(context_frames) # [1, T - 1, A]
-        sampled_action_index = sample_random_action(n_actions) # [1]
+        gt_action_indices = latent_action_model.quantizer.get_indices_from_latents(gt_action_latents, dim=-1)
+        if gt_action_indices.shape[1] > 0:
+            sampled_action_index = gt_action_indices[:, -1].reshape(-1).to(args.device)
+        else:
+            sampled_action_index = torch.zeros((1,), device=args.device, dtype=torch.long)
         inferred_actions.append(sampled_action_index) # [i]
-        sampled_action_index_tensor = repeat(torch.tensor(sampled_action_index, device=args.device), 'i -> 1 i') # [1, i]
+        sampled_action_index_tensor = repeat(sampled_action_index, 'i -> 1 i') # [1, i]
         sampled_action_latent = latent_action_model.quantizer.get_latents_from_indices(sampled_action_index_tensor) # [1, i, A]
         action_latent = torch.cat([gt_action_latents, sampled_action_latent], dim=1) # [1, T, A]
     elif args.use_actions: # use random actions

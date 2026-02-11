@@ -20,6 +20,10 @@ use_actions: false # use random actions
 use_gt_actions: false # use lam-inferred actions
 use_interactive_mode: false # use user-inputted actions
 
+# reproducibility controls
+seed:
+sample_index:
+
 # inference acceleration
 amp: false
 tf32: false

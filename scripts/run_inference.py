@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import time
 import os
 import random
+import numpy as np
 import glob
 import re
 from utils.utils import load_videotokenizer_from_checkpoint, load_latent_actions_from_checkpoint, load_dynamics_from_checkpoint, find_latest_checkpoint
@@ -137,6 +138,15 @@ def main():
     # load inference config
     args: InferenceConfig = load_config(InferenceConfig, default_config_path=os.path.join(os.getcwd(), 'configs', 'inference.yaml'))
 
+    # optional deterministic controls for reproducible debugging/comparison
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"[Determinism] seed={args.seed}")
+
     # enable tf32 if requested
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -195,8 +205,17 @@ def main():
     _, _, data_loader, _, _ = load_data_and_data_loaders(
         dataset=args.dataset, batch_size=1, num_frames=frames_to_load, **data_overrides)
 
-    # sample random batch
-    random_idx = random.randint(0, len(data_loader.dataset) - 1)
+    # select evaluation sample (fixed index if provided, otherwise random)
+    dataset_size = len(data_loader.dataset)
+    if args.sample_index is not None:
+        if args.sample_index < 0 or args.sample_index >= dataset_size:
+            raise IndexError(
+                f"sample_index={args.sample_index} out of range [0, {dataset_size - 1}]"
+            )
+        random_idx = int(args.sample_index)
+    else:
+        random_idx = random.randint(0, dataset_size - 1)
+    print(f"[Data] sample_index={random_idx} / {dataset_size - 1}")
     og_ground_truth_frames = data_loader.dataset[random_idx][0]  # full sequence
     og_ground_truth_frames = og_ground_truth_frames.unsqueeze(0).to(args.device)  # [1, frames_to_load, C, H, W]
 
@@ -292,7 +311,14 @@ def main():
         # point is for user to be able to interact with it in real time
 
     # visualize inference
-    visualize_inference(generated_frames, ground_truth_frames, inferred_actions, args.fps, use_actions=use_latent_actions)
+    visualize_inference(
+        generated_frames,
+        ground_truth_frames,
+        inferred_actions,
+        args.fps,
+        use_actions=use_latent_actions,
+        context_window=args.context_window,
+    )
 
 
 if __name__ == "__main__":

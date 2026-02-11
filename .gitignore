@@ -18,3 +18,7 @@ docs/**/zelda-2025-git-evidence-*
 docs/action/train-to-inference-retrospective-*.md
 docs/action/train-to-inference-report-*.md
 docs/action/wandb-analysis-*
+docs/action/inference-temperature-sweep-*.md
+docs/action/inference-temperature-sweep-*.csv
+docs/action/inference-batch-eval-*.md
+docs/action/inference-batch-eval-*.csv

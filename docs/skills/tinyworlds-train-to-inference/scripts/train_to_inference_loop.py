@@ -324,6 +324,10 @@ def run_standard_inference_gate(args, repo_root, env, video_ckpt, latent_ckpt, d
         f"latent_actions_path={latent_checkpoint_dir}",
         f"dynamics_path={dynamics_checkpoint_dir}",
     ]
+    if args.inference_seed is not None:
+        cmd.append(f"seed={args.inference_seed}")
+    if args.inference_sample_index is not None:
+        cmd.append(f"sample_index={args.inference_sample_index}")
     proc = run_process(cmd, cwd=repo_root, env=env)
     output = f"{proc.stdout}\n{proc.stderr}".strip()
 
@@ -429,6 +433,8 @@ def write_report(report_path, report):
         f"- train_stage: `{report['train_stage']}`",
         f"- checkpoint_policy: `{report['checkpoint_policy']}`",
         f"- teacher_forced: `{report.get('teacher_forced')}`",
+        f"- inference_seed: `{report.get('inference_seed')}`",
+        f"- inference_sample_index: `{report.get('inference_sample_index')}`",
         f"- cleanup_extra_processes: `{report.get('cleanup_extra_processes')}`",
         f"- enforce_dual_gpu_check: `{report.get('enforce_dual_gpu_check')}`",
         f"- monitor_interval_sec: `{report.get('monitor_interval_sec')}`",
@@ -642,6 +648,8 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.5)
     parser.add_argument("--teacher-forced", action="store_true")
     parser.add_argument("--max-mse", type=float, default=0.03)
+    parser.add_argument("--inference-seed", type=int, default=None)
+    parser.add_argument("--inference-sample-index", type=int, default=None)
 
     parser.add_argument("--max-inference-retries", type=int, default=2)
     parser.add_argument("--retry-chunk", type=int, default=2000)
@@ -697,6 +705,8 @@ def main():
         "train_stage": args.train_stage,
         "checkpoint_policy": args.checkpoint_policy,
         "teacher_forced": bool(args.teacher_forced),
+        "inference_seed": args.inference_seed,
+        "inference_sample_index": args.inference_sample_index,
         "training_calls": [],
         "inference_attempts": [],
         "checkpoints": {},

@@ -294,6 +294,9 @@ class InferenceConfig:
     compile: bool
     # Interactive mode (user enters action ids)
     use_interactive_mode: bool
+    # Reproducibility controls
+    seed: Optional[int] = None
+    sample_index: Optional[int] = None
     preload_ratio: Optional[float] = None
 
 
