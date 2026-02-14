@@ -22,3 +22,7 @@ docs/action/inference-temperature-sweep-*.md
 docs/action/inference-temperature-sweep-*.csv
 docs/action/inference-batch-eval-*.md
 docs/action/inference-batch-eval-*.csv
+docs/action/zelda-dynamics-training-retrospective-*
+docs/action/asset-move-report-*
+docs/action/asset-move-manifest-*
+docs/action/zelda-dynamics-training-*

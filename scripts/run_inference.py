@@ -146,6 +146,10 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
         print(f"[Determinism] seed={args.seed}")
+    print(
+        f"[Inference] context_window={args.context_window}, generation_steps={args.generation_steps}, "
+        f"prediction_horizon={args.prediction_horizon}, decode_steps={args.decode_steps}, temperature={args.temperature}"
+    )
 
     # enable tf32 if requested
     if args.tf32:
@@ -290,7 +294,7 @@ def main():
             next_video_latents = dynamics_model.forward_inference(
                 context_latents=video_latents,
                 prediction_horizon=args.prediction_horizon,
-                num_steps=10,
+                num_steps=args.decode_steps,
                 index_to_latents_fn=idx_to_latents,
                 conditioning=action_latent,
                 temperature=args.temperature,

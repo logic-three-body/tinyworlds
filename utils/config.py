@@ -282,6 +282,7 @@ class InferenceConfig:
     context_window: int
     fps: int
     temperature: float
+    decode_steps: int
     use_actions: bool
     teacher_forced: bool
     use_latest_checkpoints: bool

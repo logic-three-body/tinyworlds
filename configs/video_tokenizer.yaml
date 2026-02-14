@@ -1,8 +1,8 @@
 # Training
 batch_size_per_gpu: 16
 gradient_accumulation_steps: 2
-n_updates: 40000
-learning_rate: 0.001
+n_updates: 50000
+learning_rate: 0.0004
 log_interval: 2500
 
 # these can vary but for convenience, here
