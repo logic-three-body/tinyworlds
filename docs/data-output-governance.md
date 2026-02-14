@@ -48,9 +48,18 @@ Do not treat as output artifacts:
 
 Latest completed migration evidence:
 
-- Report: `docs/action/asset-move-report-20260213_021236.md`
-- Manifest: `docs/action/asset-move-manifest-20260213_021236.txt`
+- Local report (git-ignored): `docs/action/asset-move-report-20260213_021236.md`
+- Local manifest (git-ignored): `docs/action/asset-move-manifest-20260213_021236.txt`
 - Target root used: `/mnt/y/WorldModel/Tinyworld_backup/20260213_021236`
+
+## Version Control Policy (Mandatory)
+
+The following files are temporary local logs for migration operations and must not be versioned:
+
+- `docs/action/asset-move-report-*.md`
+- `docs/action/asset-move-manifest-*.txt`
+
+These files are local operation evidence only. Keep them on disk for audit, but do not commit them.
 
 ## Operational Requirements
 
@@ -62,4 +71,4 @@ Latest completed migration evidence:
 ## Change Control
 
 - Any change to default output root must update this file first.
-- Any large output migration must append a new `docs/action/asset-move-report-<timestamp>.md` and matching manifest.
+- Any large output migration must generate a local `docs/action/asset-move-report-<timestamp>.md` and matching manifest (git-ignored, not committed).

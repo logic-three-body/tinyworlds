@@ -15,6 +15,22 @@ Use this skill to execute TinyWorlds training end-to-end with automatic gates:
 
 The loop target is completion of all stages: `video_tokenizer -> latent_actions -> dynamics`.
 
+## Output Governance
+Use `docs/data-output-governance.md` as the source of truth.
+
+Define:
+- `RUN_BUNDLE_ROOT=/mnt/y/WorldModel/Tinyworld_backup/<YYYYMMDD_HHMMSS>`
+
+All generated artifacts must be written under:
+- `RUN_BUNDLE_ROOT/results/...`
+- `RUN_BUNDLE_ROOT/inference_results/...`
+- `RUN_BUNDLE_ROOT/wandb/run-*/...`
+- `RUN_BUNDLE_ROOT/docs/action/...` (generated reports/plots)
+
+Temporary migration logs are local-only and must remain git-ignored:
+- `docs/action/asset-move-report-*.md`
+- `docs/action/asset-move-manifest-*.txt`
+
 ## Workflow
 ### Step 1: Preflight
 Before running:
@@ -48,16 +64,16 @@ Resume support by stage:
 Config baseline (`configs/*.yaml`):
 | Stage | batch_size_per_gpu | grad_accum | learning_rate | log_interval | n_updates |
 |---|---:|---:|---:|---:|---:|
-| video_tokenizer | 16 | 2 | 1e-3 | 2500 | 40000 |
-| latent_actions | 16 | 1 | 1e-4 | 500 | 10000 |
-| dynamics | 8 | 2 | 5e-4 | 1000 | 300000 |
+| video_tokenizer | 16 | 2 | 4e-4 | 2500 | 50000 |
+| latent_actions | 16 | 1 | 1e-4 | 500 | 15000 |
+| dynamics | 12 | 1 | 2e-4 | 1000 | 160000 |
 
 Long-run safe start (recommended):
 | Stage | batch_size_per_gpu | grad_accum | learning_rate | chunk | target_updates |
 |---|---:|---:|---:|---:|---:|
 | video_tokenizer | 8 | 2 | 3e-4 | 5000 | 40000 |
 | latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
-| dynamics | 4 | 2 | 5e-4 | 4000 | 300000 |
+| dynamics | 8 | 1 | 2e-4 | 4000 | 160000 |
 
 Track and report:
 - `effective_batch = batch_size_per_gpu * gradient_accumulation_steps * nproc_per_node`
@@ -82,8 +98,8 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --cleanup-extra-processes true \
   --enforce-dual-gpu-check true \
   --only-stage dynamics \
-  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
-  --latent-checkpoint results/<run>/latent_actions/checkpoints \
+  --video-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/latent_actions/checkpoints \
   --dynamics-min-batch-size 4
 ```
 
@@ -95,9 +111,9 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --cleanup-extra-processes true \
   --enforce-dual-gpu-check true \
   --only-stage dynamics \
-  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
-  --latent-checkpoint results/<run>/latent_actions/checkpoints \
-  --dynamics-checkpoint results/<run>/dynamics/checkpoints \
+  --video-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/latent_actions/checkpoints \
+  --dynamics-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/dynamics/checkpoints \
   --target-updates 124000 \
   --dynamics-chunk 4000 \
   --init-learning-rate 0.0005 \
@@ -116,7 +132,7 @@ python docs/skills/tinyworlds-training-diagnostics/scripts/export_local_wandb_hi
   --suffix gate
 ```
 - Run `scripts/stage_gate_verdict.py` for numeric verdict.
-- Inspect latest visualization files under `results/<run>/<stage>/visualizations/`.
+- Inspect latest visualization files under `<RUN_BUNDLE_ROOT>/results/<run>/<stage>/visualizations/`.
 - Validate checkpoint integrity (non-empty model/optimizer state).
 - Enforce visualization freshness: if no new `.png` appears for a chunk, treat as gate failure and retune/retry.
 
@@ -149,10 +165,10 @@ Then hand off checkpoint paths:
 ### Step 6: Finish Full Pipeline
 After `dynamics` passes:
 - Run `docs/skills/tinyworlds-standard-inference-test` immediately (no manual gap).
-- Check `inference_results/inference_results_gt_vs_pred_*.png` and parsed MSE.
+- Check `<RUN_BUNDLE_ROOT>/inference_results/inference_results_gt_vs_pred_*.png` and parsed MSE.
 - For ZELDA default gate: `Mean Squared Error (GT vs Pred) <= 0.03`.
 - If inference gate fails, return to `dynamics` retune/retry loop, then re-run inference gate.
-- Write a report in `docs/action/` with:
+- Write a report in `<RUN_BUNDLE_ROOT>/docs/action/` with:
   - gate-by-gate decisions,
   - config changes applied,
   - final checkpoint paths,
@@ -168,6 +184,7 @@ After `dynamics` passes:
 7. Training is not considered complete until standard inference gate passes.
 8. If a stage reaches its minimum batch floor and still fails, mark run as degraded and log reason explicitly.
 9. Do not interpret chunk-local progress as global completion; completion follows absolute target step.
+10. Output data paths must follow `docs/data-output-governance.md`; `asset-move-report/manifest` files are local-only and must not be committed.
 
 ## Validated Example
 - Dual-GPU launcher/monitor success sample:

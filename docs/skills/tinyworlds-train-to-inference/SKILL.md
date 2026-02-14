@@ -13,10 +13,26 @@ Use one deterministic loop:
 4. Audit git history (default: 2025 strict ZELDA evidence).
 5. Run full gated training in order (`video_tokenizer -> latent_actions -> dynamics`).
 6. Run standard inference validation (`tinyworlds-standard-inference-test`).
-7. Check `inference_results` + metric gate.
+7. Check inference outputs + metric gate.
 8. If fail, retune/retrain `dynamics` and re-run inference.
 9. Run W&B stage analysis (API first, local Logs fallback).
-10. Write retrospective + evidence reports under `docs/action/`.
+10. Write retrospective + evidence reports under governed output root.
+
+## Output Governance
+Use `docs/data-output-governance.md` as the only output-location standard.
+
+Define:
+- `RUN_BUNDLE_ROOT=/mnt/y/WorldModel/Tinyworld_backup/<YYYYMMDD_HHMMSS>`
+
+Write all generated artifacts under this root:
+- `RUN_BUNDLE_ROOT/results/...`
+- `RUN_BUNDLE_ROOT/inference_results/...`
+- `RUN_BUNDLE_ROOT/wandb/run-*/...`
+- `RUN_BUNDLE_ROOT/docs/action/...` (generated reports/plots only)
+
+Temporary migration logs are local-only and must stay git-ignored:
+- `docs/action/asset-move-report-*.md`
+- `docs/action/asset-move-manifest-*.txt`
 
 ## Config Alignment Rule (ZELDA)
 Before running the loop, enforce cross-stage backbone alignment (following `d574160`'s alignment principle):
@@ -45,16 +61,16 @@ If effective batch changes after auto-retune, record the change in report/retros
 ### Config Baseline (from current configs)
 | Stage | batch_size_per_gpu | grad_accum | learning_rate | log_interval | n_updates |
 |---|---:|---:|---:|---:|---:|
-| video_tokenizer | 16 | 2 | 1e-3 | 2500 | 40000 |
-| latent_actions | 16 | 1 | 1e-4 | 500 | 10000 |
-| dynamics | 8 | 1 | 5e-4 | 1000 | 120000 |
+| video_tokenizer | 16 | 2 | 4e-4 | 2500 | 50000 |
+| latent_actions | 16 | 1 | 1e-4 | 500 | 15000 |
+| dynamics | 12 | 1 | 2e-4 | 1000 | 160000 |
 
 ### Long-Run Safe Start (recommended)
 | Stage | batch_size_per_gpu | grad_accum | learning_rate | chunk | target_updates |
 |---|---:|---:|---:|---:|---:|
 | video_tokenizer | 8 | 2 | 3e-4 | 5000 | 40000 |
 | latent_actions | 8 | 1 | 1e-4 | 2000 | 10000 |
-| dynamics | 8 | 1 | 5e-4 | 4000 | 120000 |
+| dynamics | 8 | 1 | 2e-4 | 4000 | 160000 |
 
 When runtime/OOM instability appears, use stage floors for runtime retune:
 - `video_tokenizer`: `8 -> floor 8` (do not reduce below 8)
@@ -109,7 +125,7 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --init-grad-accum 2 \
   --init-learning-rate 0.0003 \
   --init-log-interval 500 \
-  --video-checkpoint results/<run>/video_tokenizer/checkpoints
+  --video-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/video_tokenizer/checkpoints
 ```
 
 Stage B/C: latent and dynamics long-run
@@ -127,7 +143,7 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --init-grad-accum 1 \
   --init-learning-rate 0.0001 \
   --init-log-interval 500 \
-  --latent-checkpoint results/<run>/latent_actions/checkpoints
+  --latent-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/latent_actions/checkpoints
 ```
 
 ```bash
@@ -137,15 +153,15 @@ python docs/skills/tinyworlds-training-causal-diagnostics/scripts/auto_train_loo
   --cleanup-extra-processes true \
   --enforce-dual-gpu-check true \
   --only-stage dynamics \
-  --video-checkpoint results/<run>/video_tokenizer/checkpoints \
-  --latent-checkpoint results/<run>/latent_actions/checkpoints \
-  --dynamics-checkpoint results/<run>/dynamics/checkpoints \
+  --video-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/video_tokenizer/checkpoints \
+  --latent-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/latent_actions/checkpoints \
+  --dynamics-checkpoint <RUN_BUNDLE_ROOT>/results/<run>/dynamics/checkpoints \
   --dynamics-chunk 4000 \
-  --target-updates 120000 \
+  --target-updates 160000 \
   --init-batch-size 8 \
   --dynamics-min-batch-size 4 \
   --init-grad-accum 1 \
-  --init-learning-rate 0.0005 \
+  --init-learning-rate 0.0002 \
   --init-log-interval 1000
 ```
 
@@ -156,7 +172,7 @@ Pass only when all conditions hold:
   - selected checkpoints for all 3 models
   - `Inferring frame ...`
   - `Inference stats`
-- A new PNG appears under `inference_results/inference_results_gt_vs_pred_*.png`.
+- A new PNG appears under `<RUN_BUNDLE_ROOT>/inference_results/inference_results_gt_vs_pred_*.png`.
 - `Mean Squared Error (GT vs Pred)` is present and `<= max_mse`.
 
 Fail when any condition above is missing.
@@ -164,8 +180,8 @@ Fail when any condition above is missing.
 ## Runtime Monitoring (required)
 During long runs, monitor all three channels:
 1. W&B and exported local history (`Logs/*history*.csv|json`).
-2. Checkpoint progression (`results/<run>/<stage>/checkpoints/*_step_*`).
-3. Visualization freshness (`results/<run>/<stage>/visualizations/*.png`).
+2. Checkpoint progression (`<RUN_BUNDLE_ROOT>/results/<run>/<stage>/checkpoints/*_step_*`).
+3. Visualization freshness (`<RUN_BUNDLE_ROOT>/results/<run>/<stage>/visualizations/*.png`).
 
 Optional 4-hour watch process output:
 - `Logs/monitor_4h_latest.info`
@@ -192,19 +208,19 @@ Controller retune ladder:
 
 ## Artifacts
 - Runtime report:
-  - `docs/action/train-to-inference-report-<timestamp>.md`
+  - `<RUN_BUNDLE_ROOT>/docs/action/train-to-inference-report-<timestamp>.md`
 - Git evidence report:
-  - `docs/action/zelda-<year>-git-evidence-<timestamp>.md`
+  - `<RUN_BUNDLE_ROOT>/docs/action/zelda-<year>-git-evidence-<timestamp>.md`
 - W&B analysis reports:
-  - `docs/action/wandb-analysis-<timestamp>.md`
-  - `docs/action/wandb-analysis-<timestamp>.json`
-  - `docs/action/plots/wandb-analysis-<timestamp>/*.png`
+  - `<RUN_BUNDLE_ROOT>/docs/action/wandb-analysis-<timestamp>.md`
+  - `<RUN_BUNDLE_ROOT>/docs/action/wandb-analysis-<timestamp>.json`
+  - `<RUN_BUNDLE_ROOT>/docs/action/plots/wandb-analysis-<timestamp>/*.png`
 - Retrospective report (required):
-  - `docs/action/train-to-inference-retrospective-<timestamp>.md`
+  - `<RUN_BUNDLE_ROOT>/docs/action/train-to-inference-retrospective-<timestamp>.md`
 - Training reports from controller:
-  - `docs/action/auto-training-loop-report-<timestamp>.md`
+  - `<RUN_BUNDLE_ROOT>/docs/action/auto-training-loop-report-<timestamp>.md`
 - Inference outputs:
-  - `inference_results/*.png`
+  - `<RUN_BUNDLE_ROOT>/inference_results/*.png`
 
 ## Hard Rules
 1. Default to full pipeline (`--train-stage all`) for closed-loop validation.
@@ -216,6 +232,7 @@ Controller retune ladder:
 7. Use absolute-step resume semantics for chunked runs; do not reset logical progress per chunk.
 8. If any stage hits its minimum batch floor and still fails gate, mark run status as `degraded` and record cause in retrospective.
 9. Always report effective batch and parameter changes across retries.
+10. Data output paths must follow `docs/data-output-governance.md`; migration logs under `docs/action/asset-move-*` are local-only and not committed.
 
 ## Validated Example (v2)
 - Teacher-forced closed-loop pass (single GPU):

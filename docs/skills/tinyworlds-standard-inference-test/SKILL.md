@@ -14,6 +14,20 @@ Produce a repeatable test that answers:
 - can it generate frames end to end
 - are core outputs (`png`) and key metrics printed
 
+## Output Governance
+Use `docs/data-output-governance.md` as source of truth.
+
+Define:
+- `RUN_BUNDLE_ROOT=/mnt/y/WorldModel/Tinyworld_backup/<YYYYMMDD_HHMMSS>`
+
+Inference artifacts should be read/written under:
+- `RUN_BUNDLE_ROOT/results/...`
+- `RUN_BUNDLE_ROOT/inference_results/...`
+
+Temporary migration logs are local-only and git-ignored:
+- `docs/action/asset-move-report-*.md`
+- `docs/action/asset-move-manifest-*.txt`
+
 ## Step 1: Prepare Environment
 
 Run from repo root:
@@ -32,7 +46,7 @@ Use `utils.find_latest_checkpoint(..., run_root_dir=...)` so the test does not a
 import os
 from utils.utils import find_latest_checkpoint
 base = os.getcwd()
-run_root = os.path.abspath(r"results/zzzz_zelda_manual_20260208_001")
+run_root = os.path.abspath(r"<RUN_BUNDLE_ROOT>/results/zzzz_zelda_manual_20260208_001")
 for model in ["video_tokenizer", "latent_actions", "dynamics"]:
     print(model, find_latest_checkpoint(base, model, run_root_dir=run_root))
 '@ | .\.venv\Scripts\python.exe -
@@ -70,7 +84,7 @@ Treat as pass when:
 - log prints all 3 selected checkpoints
 - loop prints `Inferring frame ...`
 - terminal prints `Inference stats`
-- `inference_results/inference_results_gt_vs_pred_*.png` exists
+- `<RUN_BUNDLE_ROOT>/inference_results/inference_results_gt_vs_pred_*.png` exists
 - `Mean Squared Error (GT vs Pred)` is printed and meets dataset gate:
   - ZELDA default: `<= 0.03`
 
@@ -86,7 +100,7 @@ Treat as fail when:
 ## Step 5: Tested Example (This Repo)
 
 Run root:
-- `results/zzzz_zelda_manual_20260208_001`
+- `<RUN_BUNDLE_ROOT>/results/zzzz_zelda_manual_20260208_001`
 
 Resolved checkpoints:
 - `video_tokenizer_step_37500`
@@ -96,4 +110,4 @@ Resolved checkpoints:
 Observed result:
 - inference completed with `Total frames generated: 14`
 - example metric: `Mean Squared Error (GT vs Pred): 0.022317`
-- PNG visualization generated under `inference_results/`
+- PNG visualization generated under `<RUN_BUNDLE_ROOT>/inference_results/`

@@ -9,9 +9,24 @@ description: Diagnose TinyWorlds training health from local artifacts and detect
 Use a repeatable workflow to:
 1. Export latest metrics from local `.wandb` transaction files into `Logs/`.
 2. Evaluate numeric trends for each stage (`video_tokenizer`, `latent_actions`, `dynamics`).
-3. Cross-check with `results/*/visualizations` images.
+3. Cross-check with governed `results/*/visualizations` images.
 4. Verify checkpoint integrity and resumability.
 5. Output a concise verdict: `normal`, `watch`, or `critical`.
+
+## Output Governance
+Use `docs/data-output-governance.md` as source of truth.
+
+Define:
+- `RUN_BUNDLE_ROOT=/mnt/y/WorldModel/Tinyworld_backup/<YYYYMMDD_HHMMSS>`
+
+When collecting evidence, prefer these locations:
+- `RUN_BUNDLE_ROOT/results/...`
+- `RUN_BUNDLE_ROOT/wandb/run-*/...`
+- `RUN_BUNDLE_ROOT/docs/action/...` (generated analysis outputs)
+
+Temporary migration logs are local-only and git-ignored:
+- `docs/action/asset-move-report-*.md`
+- `docs/action/asset-move-manifest-*.txt`
 
 ## Workflow
 
@@ -19,8 +34,8 @@ Use a repeatable workflow to:
 Read only what is needed:
 - `README.md` for expected pipeline behavior (tokenizer -> action tokenizer -> dynamics).
 - Target notes under `docs/action/` (user-provided context files).
-- `results/` directory tree and latest timestamps.
-- `wandb/run-*/` local run folders.
+- `RUN_BUNDLE_ROOT/results/` directory tree and latest timestamps.
+- `RUN_BUNDLE_ROOT/wandb/run-*/` local run folders.
 
 ### Step 2: Export Latest Metrics to Logs
 Preferred:
@@ -51,9 +66,9 @@ See thresholds and interpretation rules in `references/diagnostic-checklist.md`.
 
 ### Step 4: Visual Diagnostics
 Inspect representative images from each stage:
-- `video_tokenizer/visualizations/*`
-- `latent_actions/visualizations/*`
-- `dynamics/visualizations/*`
+- `RUN_BUNDLE_ROOT/results/<run>/video_tokenizer/visualizations/*`
+- `RUN_BUNDLE_ROOT/results/<run>/latent_actions/visualizations/*`
+- `RUN_BUNDLE_ROOT/results/<run>/dynamics/visualizations/*`
 
 Compare early vs late outputs:
 - Improvement toward structure-preserving reconstructions is expected.
